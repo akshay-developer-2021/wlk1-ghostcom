@@ -13,6 +13,14 @@ export default mergeConfig(
       rollupOptions: {
         output: {
           manualChunks: { peerjs: ['peerjs'] },
+          /* stable font URLs (no hash) so index.html can preload them and
+             kill the swap flash; fonts are effectively immutable. */
+          assetFileNames: (info) => {
+            if (info.names?.some((n) => n.endsWith('.woff') || n.endsWith('.woff2'))) {
+              return 'assets/fonts/[name][extname]';
+            }
+            return 'assets/[name]-[hash][extname]';
+          },
         },
       },
     },

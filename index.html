@@ -7,6 +7,8 @@
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob: mediastream:; connect-src 'self' wss: https: stun: turn: turns:; font-src 'self'; worker-src 'self' blob:;">
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="preload" href="/assets/fonts/vt323-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0c110a">
 <link rel="manifest" href="/manifest.webmanifest">
@@ -132,6 +134,7 @@
     </section>
 
     <section class="panel-view settings hidden" id="view-settings" aria-label="Settings">
+      <div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
       <div class="panel-head">
         <div class="model"><b>WLK-1 ▮ SETTINGS</b><span class="sub">BROKER · TURN · DIAGNOSTICS · IDENTITY</span></div>
       </div>
