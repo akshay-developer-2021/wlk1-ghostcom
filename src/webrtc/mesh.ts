@@ -53,6 +53,7 @@ export class Mesh {
   private _missStrikes = new Map<number, number>(); // slot -> consecutive peer-unavailable strikes
   private _joinMutex: Promise<JoinResult | undefined> | null = null;
   private _rejoinInFlight: Promise<void> | null = null;
+  private _reconnectChain = false; // single-flight broker reconnect loop
   private _destroyed = false;
   private _sasPrints = new Map<string, Set<string>>();
   private _watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -134,6 +135,10 @@ export class Mesh {
     const attempts: Array<Promise<SlotAttempt>> = [];
     for (let i = 0; i < this.cfg.maxSlots; i++) {
       const pr: Promise<SlotAttempt> = (async (): Promise<SlotAttempt> => {
+        /* stagger probes so the broker never sees an 8-socket burst —
+           first-open-wins means slot 0 usually claims before the rest
+           even start, so this rarely costs latency. */
+        await new Promise<void>((r) => setTimeout(r, i * 150));
         const id = await slotPeerId(secret, channel, i);
         let p: Peer;
         try {
@@ -251,26 +256,29 @@ export class Mesh {
       this.log(`SIGNAL ERR: ${type}`, 'warn');
     });
 
-    /* Real broker-outage recovery (the PoC swallowed this). */
+    /* Real broker-outage recovery (the PoC swallowed this). Single-flight:
+       overlapping 'disconnected' events share one retry chain. */
     p.on('disconnected', () => {
-      if (this._destroyed || this.peer !== p) return;
+      if (this._destroyed || this.peer !== p || this._reconnectChain) return;
+      this._reconnectChain = true;
       set({ connected: false });
       this.log('SIGNAL LOST — RECONNECTING…', 'warn');
       let tries = 0;
       const retry = (): void => {
-        if (this._destroyed || !this.peer || this.peer !== p) return;
+        if (this._destroyed || !this.peer || this.peer !== p) { this._reconnectChain = false; return; }
         try { p.reconnect(); } catch { /* noop */ }
         this.log(`RECONNECT TRY ${++tries}`, 'sys');
         if (tries < this.cfg.reconnect.maxTries) {
           setTimeout(retry, Math.min(this.cfg.reconnect.baseMs * 2 ** tries, this.cfg.reconnect.maxMs));
         } else {
+          this._reconnectChain = false;
           this._rejoin();
         }
       };
       retry();                                    // reconnect immediately, no dead 1.2s
     });
 
-    p.on('open', () => set({ connected: true }));
+    p.on('open', () => { this._reconnectChain = false; set({ connected: true }); });
   }
 
   async _rejoin(): Promise<void> {
@@ -902,6 +910,10 @@ export class Mesh {
       if (this._destroyed) return;
       if (typeof document !== 'undefined' && document.hidden) return;
       if (state.tx) return;                       // never disturb an active TX
+      /* Outage hush: with no signaling socket, redials can't learn
+         anything — they only burn sockets, spam strikes, and hammer the
+         broker. The reconnect chain / rejoin owns recovery until 'open'. */
+      if (!state.connected) return;
       if (!this.peer || this.peer.destroyed || this.slot < 0) return;
       if (this.legs.size === 0) {
         /* zero-leg probe: knownOccupied is empty after a fresh join or a
