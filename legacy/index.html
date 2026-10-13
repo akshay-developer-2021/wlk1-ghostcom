@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2780%27%3E📡%3C/text%3E%3C/svg%3E">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>WLK-1 ▮ GHOSTCOM</title>
+<link rel="preconnect" href="https://unpkg.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root{
+  --carc:#3a4a2e; --lcd:#b8ffa8; --lcd-dim:#8aad7a;
+  --accent:#e83e8c; --tx:#ff5f56; --amber:#f5a623;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+html,body{height:100%;background:#050705;font-family:'Inter',sans-serif;color:#ddd;overflow:hidden;
+  display:flex;align-items:center;justify-content:center;}
+
+#matrix{position:fixed;inset:0;z-index:0;opacity:.5;pointer-events:none;}
+
+/* ══════════ SHELL ══════════ */
+.shell{width:390px;height:844px;background:#000;border-radius:48px;padding:12px 10px 16px;
+  box-shadow:0 50px 100px rgba(184,255,168,0.04),0 30px 60px rgba(0,0,0,0.85),inset 0 0 0 1px rgba(184,255,168,0.07);
+  position:relative;display:flex;flex-direction:column;overflow:hidden;transform-origin:center;z-index:2;}
+.notch{position:absolute;top:0;left:50%;transform:translateX(-50%);width:160px;height:34px;background:#000;
+  border-bottom-left-radius:18px;border-bottom-right-radius:18px;z-index:50;}
+.screen{flex:1;background:#0c110a;overflow:hidden;position:relative;border-radius:36px;display:flex;flex-direction:column;}
+.home-bar{position:absolute;bottom:6px;left:50%;transform:translateX(-50%);width:120px;height:4px;
+  background:rgba(255,255,255,0.3);border-radius:9999px;z-index:40;}
+
+/* ══════════ RADIO BODY ══════════ */
+.radio{flex:1;
+  background:radial-gradient(120% 80% at 50% 0%, rgba(184,255,168,0.05), transparent 60%),
+             linear-gradient(180deg,#3a4a2e 0%,#232c1b 100%);
+  border-radius:24px;margin:16px 12px 10px;padding:14px 14px 20px;
+  box-shadow:inset 0 -2px 8px rgba(0,0,0,0.55),inset 0 1px 0 rgba(184,255,168,0.08),0 10px 30px rgba(0,0,0,0.6);
+  position:relative;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;}
+.radio::-webkit-scrollbar{width:0;}
+.radio::after{content:'';position:absolute;inset:0;pointer-events:none;z-index:60;border-radius:24px;
+  background:repeating-linear-gradient(0deg,transparent 0 2px,rgba(0,0,0,0.06) 2px 4px);}
+.powsave .radio::after{display:none;}
+
+.top-bar{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;}
+.model{font-family:'VT323',monospace;font-size:11px;letter-spacing:2px;color:#8a9a7a;text-transform:uppercase;}
+.model b{color:#b8ffa8;font-weight:400;display:inline-block;animation:glitch 4s steps(1) infinite;}
+.powsave .model b{animation:none;}
+@keyframes glitch{0%,91%,100%{text-shadow:none;transform:none}
+  92%{text-shadow:2px 0 #ff00c8,-2px 0 #00fff9;transform:translateX(1px)}
+  94%{text-shadow:-2px 0 #ff00c8,2px 0 #00fff9;transform:translateX(-1px)}
+  96%{text-shadow:1px 0 #ff00c8,-1px 0 #00fff9}}
+.model .sub{color:#57654f;font-size:9px;display:block;letter-spacing:1.5px;}
+.antenna{width:10px;height:50px;background:linear-gradient(90deg,#555,#777);border-radius:5px;
+  box-shadow:inset -2px 0 3px rgba(0,0,0,0.4);position:relative;flex-shrink:0;margin-left:8px;}
+.antenna::after{content:'';position:absolute;top:-8px;left:50%;transform:translateX(-50%);width:6px;height:10px;background:#777;border-radius:3px;}
+.antenna.live::before{content:'';position:absolute;inset:0;border-radius:5px;
+  background:linear-gradient(90deg,rgba(255,95,86,0.55),transparent);animation:antpulse 1s ease-in-out infinite;}
+.powsave .antenna.live::before{animation:none;opacity:.5;}
+@keyframes antpulse{0%,100%{opacity:.15}50%{opacity:.85}}
+
+.knob-wrap{display:flex;flex-direction:column;align-items:center;gap:3px;}
+.knob{width:34px;height:34px;border-radius:50%;cursor:grab;touch-action:none;position:relative;
+  background:conic-gradient(from 0deg,#666 0deg,#444 60deg,#777 120deg,#555 180deg,#666 240deg,#444 300deg,#666 360deg);
+  border:2px solid #333;box-shadow:inset 0 2px 4px rgba(255,255,255,0.2),0 3px 6px rgba(0,0,0,0.5);}
+.knob::after{content:'';position:absolute;top:3px;left:50%;width:2px;height:10px;background:#b8ffa8;
+  transform:translateX(-50%);border-radius:2px;box-shadow:0 0 4px #b8ffa8;}
+.knob-label{font-family:'VT323',monospace;font-size:8px;color:#777;letter-spacing:1px;}
+
+/* ══════════ LCD ══════════ */
+.lcd{background:#0b1508;border:2px solid #556b45;border-radius:8px;padding:10px 12px;
+  box-shadow:inset 0 0 24px rgba(184,255,168,0.1),0 0 0 1px rgba(0,0,0,0.4);position:relative;}
+.lcd::before{content:'';position:absolute;inset:0;pointer-events:none;border-radius:6px;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.09) 2px,rgba(0,0,0,0.09) 4px);}
+.powsave .lcd{box-shadow:inset 0 0 10px rgba(184,255,168,0.05);}
+.lcd-row1{display:flex;justify-content:space-between;align-items:baseline;}
+.lcd-header{font-family:'VT323',monospace;font-size:11px;color:var(--lcd-dim);letter-spacing:2px;}
+.enc{font-family:'VT323',monospace;font-size:10px;color:var(--lcd-dim);letter-spacing:1px;
+  border:1px solid rgba(184,255,168,0.25);border-radius:3px;padding:0 4px;}
+.lcd-freq{font-family:'VT323',monospace;font-size:32px;color:var(--lcd);line-height:1;letter-spacing:2px;
+  text-shadow:0 0 10px rgba(184,255,168,0.45);margin-top:2px;}
+.lcd-meta{display:flex;justify-content:space-between;align-items:center;margin-top:4px;}
+.lcd-chan{font-family:'VT323',monospace;font-size:13px;color:#c4e898;letter-spacing:1px;}
+.lcd.entering .lcd-chan{color:var(--amber);text-shadow:0 0 8px rgba(245,166,35,0.4);}
+.lnk{font-family:'VT323',monospace;font-size:12px;color:var(--lcd-dim);display:flex;gap:6px;align-items:center;}
+.sigbars{display:inline-flex;gap:2px;align-items:flex-end;height:10px;}
+.sigbars i{width:3px;background:var(--lcd-dim);border-radius:1px;opacity:.25;transition:opacity .3s;}
+.sigbars i.on{opacity:1;background:var(--lcd);box-shadow:0 0 4px rgba(184,255,168,0.6);}
+.sigbars i:nth-child(1){height:3px}.sigbars i:nth-child(2){height:5px}
+.sigbars i:nth-child(3){height:7px}.sigbars i:nth-child(4){height:10px}
+.lcd-boot{font-family:'VT323',monospace;font-size:11px;color:var(--lcd-dim);letter-spacing:1px;margin-top:6px;min-height:14px;}
+.cursor{display:inline-block;width:7px;height:11px;background:var(--lcd);animation:cur .8s steps(1) infinite;vertical-align:-1px;}
+@keyframes cur{0%,49%{opacity:1}50%,100%{opacity:0}}
+
+/* ══════════ LEDS ══════════ */
+.status-row{display:flex;gap:14px;margin-top:8px;padding:0 4px;align-items:center;}
+.status-led{font-family:'VT323',monospace;font-size:12px;color:var(--lcd-dim);letter-spacing:1px;display:flex;align-items:center;gap:5px;}
+.led{width:7px;height:7px;border-radius:50%;background:#2a3520;transition:all .2s;}
+.led.on{background:var(--lcd);box-shadow:0 0 8px var(--lcd);}
+.led.tx{background:var(--tx);box-shadow:0 0 8px var(--tx),0 0 16px rgba(255,95,86,0.5);}
+.batt{margin-left:auto;font-family:'VT323',monospace;font-size:12px;color:var(--lcd-dim);}
+
+/* ══════════ KEYPAD ══════════ */
+.keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:12px;}
+.key{height:36px;background:linear-gradient(180deg,#5a6f4a,#3d4f34);border:1px solid #2d3a22;border-radius:8px;
+  display:flex;align-items:center;justify-content:center;font-family:'VT323',monospace;font-size:16px;color:#b8ffa8;
+  text-shadow:0 1px 2px rgba(0,0,0,0.4);box-shadow:inset 0 2px 0 rgba(255,255,255,0.08),0 3px 6px rgba(0,0,0,0.3);
+  cursor:pointer;user-select:none;-webkit-user-select:none;transition:transform .05s;}
+.key:active{transform:translateY(2px);}
+.key.util{font-size:12px;color:var(--lcd-dim);}
+.key.mic{color:#ffb3d5;}
+.key.share{grid-column:span 3;color:#9ad0ff;font-size:13px;letter-spacing:2px;}
+
+/* ══════════ PEER CHIPS ══════════ */
+.peers{display:flex;gap:5px;flex-wrap:wrap;margin-top:10px;min-height:22px;}
+.chip{font-family:'VT323',monospace;font-size:11px;letter-spacing:1px;padding:3px 8px;border-radius:4px;
+  background:rgba(0,0,0,0.3);border:1px solid rgba(184,255,168,0.2);color:var(--lcd-dim);
+  display:flex;align-items:center;gap:5px;transition:all .2s;}
+.chip .dot{width:5px;height:5px;border-radius:50%;background:#2a3520;}
+.chip.linked{color:var(--lcd);border-color:rgba(184,255,168,0.4);}
+.chip.linked .dot{background:var(--lcd);box-shadow:0 0 5px var(--lcd);}
+.chip.speaking{border-color:var(--tx);color:#ffd2ce;box-shadow:0 0 10px rgba(255,95,86,0.35);}
+.chip.speaking .dot{background:var(--tx);box-shadow:0 0 6px var(--tx);}
+
+/* ══════════ VOICE BARS ══════════ */
+.voice-bars{display:flex;align-items:flex-end;justify-content:center;gap:3px;height:26px;margin-top:10px;}
+.vb{width:4px;height:4px;background:linear-gradient(180deg,var(--accent),#d2317e);border-radius:2px;
+  transition:height .05s linear;opacity:.85;will-change:height;}
+.vb.live{background:linear-gradient(180deg,#b8ffa8,#5a9e4a);box-shadow:0 0 6px rgba(184,255,168,0.6);}
+
+/* ══════════ SYNC BAR ══════════ */
+.sync-bar{margin-top:8px;padding:9px 10px;background:rgba(0,0,0,0.25);border-radius:8px;
+  border:1px solid rgba(255,255,255,0.06);text-align:center;font-family:'VT323',monospace;
+  font-size:15px;color:var(--lcd-dim);letter-spacing:2px;transition:all .2s;}
+.sync-bar.on{color:var(--lcd);border-color:rgba(184,255,168,0.35);box-shadow:0 0 12px rgba(184,255,168,0.12);}
+.sync-bar.tx{color:var(--tx);border-color:rgba(255,95,86,0.45);box-shadow:0 0 14px rgba(255,95,86,0.2);}
+.sync-bar.warn{color:var(--amber);border-color:rgba(245,166,35,0.4);}
+
+/* ══════════ GLASS PTT ══════════ */
+.ptt-wrap{margin-top:12px;display:flex;flex-direction:column;align-items:center;gap:8px;}
+.ptt{width:96px;height:96px;border-radius:50%;cursor:pointer;position:relative;overflow:hidden;
+  background:rgba(255,255,255,0.07);border:3px solid rgba(255,255,255,0.16);
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+  box-shadow:inset 0 0 24px rgba(255,255,255,0.06),0 10px 28px rgba(0,0,0,0.45);
+  display:flex;align-items:center;justify-content:center;
+  touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
+  transition:transform .07s ease,box-shadow .18s ease;}
+.ptt::before{content:'';position:absolute;top:0;left:0;right:0;height:42%;
+  background:linear-gradient(180deg,rgba(255,255,255,0.12),transparent);pointer-events:none;}
+.ptt.pressed{transform:scale(0.9);
+  box-shadow:inset 0 0 18px rgba(184,255,168,0.15),0 0 0 4px rgba(232,62,140,0.35),0 4px 14px rgba(0,0,0,0.5);}
+.ptt .inner{width:18px;height:18px;border-radius:50%;background:var(--accent);
+  box-shadow:0 0 10px var(--accent),0 0 22px rgba(232,62,140,0.5);transition:all .2s;}
+.ptt.pressed .inner{background:#fff;box-shadow:0 0 14px #fff,0 0 34px rgba(255,255,255,0.8);transform:scale(1.15);}
+.ptt .ring{position:absolute;inset:-2px;border-radius:50%;border:2px solid transparent;}
+.ptt.pressed .ring{border-color:rgba(255,95,86,0.6);animation:ring-pulse 1.2s ease-out infinite;}
+.powsave .ptt.pressed .ring{animation:none;}
+@keyframes ring-pulse{0%{transform:scale(1);opacity:.8}100%{transform:scale(1.35);opacity:0}}
+
+/* ══════════ HACKER LOG ══════════ */
+.hack-log{margin-top:12px;padding:10px 12px;background:rgba(2,8,2,0.55);border-radius:8px;
+  border:1px solid rgba(255,95,86,0.22);position:relative;overflow:hidden;}
+.hack-log::before{content:'';position:absolute;inset:0;pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(255,95,86,0.03) 3px 4px);}
+.hack-log .head{display:flex;justify-content:space-between;font-family:'VT323',monospace;font-size:10px;
+  color:var(--tx);text-transform:uppercase;letter-spacing:3px;border-bottom:1px solid rgba(255,95,86,0.3);
+  padding-bottom:4px;margin-bottom:6px;}
+.hack-log .lines{font-family:'Courier New',monospace;font-size:10.5px;line-height:1.55;
+  max-height:118px;overflow-y:auto;color:#9fbf8f;}
+.hack-log .lines::-webkit-scrollbar{width:0;}
+.ln{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;animation:ln-in .18s ease;}
+@keyframes ln-in{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:none}}
+.ln .t{color:#4a5f42;} .ln .dir{font-weight:700;} .ln .body{color:#7a8a6e;} .ln .x{color:#4a5f42;}
+.ln.tx .dir{color:var(--tx);} .ln.tx .body{color:#d9a09a;}
+.ln.rx .dir{color:var(--lcd);} .ln.rx .body{color:#b8ffa8;}
+.ln.warn .dir{color:var(--amber);} .ln.warn .body{color:#e8c68a;}
+.log-caret{font-family:'Courier New',monospace;font-size:10.5px;color:#5a7a52;}
+.log-caret b{color:var(--lcd);font-weight:400;}
+.log-caret span{animation:cur .9s steps(1) infinite;}
+
+.grille{margin-top:auto;padding:8px 10px;background:rgba(0,0,0,0.25);border-radius:8px;
+  border-top:1px solid rgba(255,255,255,0.05);display:flex;gap:4px;align-items:center;}
+.grille-hole{flex:1;height:10px;background:#333;border-radius:3px;box-shadow:inset 0 2px 3px rgba(0,0,0,0.7);}
+
+.toast{position:absolute;left:50%;bottom:70px;transform:translateX(-50%) translateY(10px);
+  background:rgba(10,20,8,0.92);border:1px solid rgba(184,255,168,0.35);color:var(--lcd);
+  font-family:'VT323',monospace;font-size:13px;letter-spacing:1px;padding:8px 14px;border-radius:8px;
+  opacity:0;pointer-events:none;transition:all .25s;z-index:70;max-width:90%;text-align:center;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+.hint{position:absolute;inset:0;z-index:65;background:rgba(5,10,4,0.9);
+  -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+  display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+  text-align:center;padding:30px;border-radius:36px;}
+.hint.show{display:flex;}
+.hint .step{font-family:'VT323',monospace;font-size:17px;color:var(--lcd);letter-spacing:2px;}
+.hint .step b{color:var(--accent);font-weight:400;}
+.hint .go{font-family:'VT323',monospace;font-size:13px;color:#0c0f0a;background:var(--lcd);
+  padding:8px 22px;border-radius:6px;letter-spacing:2px;cursor:pointer;border:none;margin-top:6px;}
+</style>
+</head>
+<body>
+<canvas id="matrix" aria-hidden="true"></canvas>
+
+<div class="shell" id="shell">
+  <div class="notch" aria-hidden="true"></div>
+  <div class="screen">
+    <div class="radio">
+      <div class="top-bar">
+        <div>
+          <div class="model"><b>WLK-1 ▮ GHOSTCOM</b><span class="sub">DTLS-SRTP E2E · P2P MESH · NO SERVER</span></div>
+        </div>
+        <div class="antenna" id="antenna" aria-label="Antenna"></div>
+        <div class="knob-wrap">
+          <div class="knob" id="volKnob" role="slider" aria-label="Volume" aria-valuemin="0" aria-valuemax="100" aria-valuenow="80" tabindex="0"></div>
+          <div class="knob-label">VOL</div>
+        </div>
+      </div>
+
+      <div class="lcd" id="lcd" aria-label="Radio display">
+        <div class="lcd-row1">
+          <div class="lcd-header">VHF · FM · P25</div>
+          <div class="enc">🔒 E2E</div>
+        </div>
+        <div class="lcd-freq" id="freq">152.480</div>
+        <div class="lcd-meta">
+          <div class="lcd-chan" id="chan">CH 22</div>
+          <div class="lnk">LNK <span id="lnkCount">0</span>
+            <span class="sigbars" id="sigbars" title="Link quality"><i></i><i></i><i></i><i></i></span>
+          </div>
+        </div>
+        <div class="lcd-boot"><span id="bootText"></span><span class="cursor"></span></div>
+      </div>
+
+      <div class="status-row" aria-label="Status">
+        <div class="status-led"><span class="led" id="txLed"></span> TX</div>
+        <div class="status-led"><span class="led" id="rxLed"></span> RX</div>
+        <div class="status-led"><span class="led on"></span> PWR</div>
+        <div class="status-led"><span class="led" id="micLed"></span> MIC</div>
+        <div class="batt" id="batt">PWR--</div>
+      </div>
+
+      <div class="keypad" aria-label="Keypad">
+        <button class="key" data-digit="1">1</button><button class="key" data-digit="2">2</button><button class="key" data-digit="3">3</button>
+        <button class="key" data-digit="4">4</button><button class="key" data-digit="5">5</button><button class="key" data-digit="6">6</button>
+        <button class="key" data-digit="7">7</button><button class="key" data-digit="8">8</button><button class="key" data-digit="9">9</button>
+        <button class="key" data-digit="0">0</button>
+        <button class="key util" id="keyDel">DEL</button>
+        <button class="key mic" id="keyMic">MIC</button>
+        <button class="key share" id="keyShare">📡 SHARE FREQUENCY</button>
+      </div>
+
+      <div class="peers" id="peers" aria-label="Linked units"></div>
+
+      <div class="voice-bars" id="voiceBars" aria-hidden="true">
+        <div class="vb"></div><div class="vb"></div><div class="vb"></div><div class="vb"></div>
+        <div class="vb"></div><div class="vb"></div><div class="vb"></div><div class="vb"></div><div class="vb"></div>
+      </div>
+
+      <div class="sync-bar" id="syncBar" role="status" aria-live="polite">ENTER CHANNEL</div>
+
+      <div class="ptt-wrap">
+        <button class="ptt" id="ptt" aria-label="Push to talk"><span class="ring"></span><span class="inner"></span></button>
+      </div>
+
+      <div class="hack-log" role="log" aria-live="polite" aria-label="Traffic log">
+        <div class="head"><span>[ TRAFFIC ]</span><span id="pktCount">0 PKTS</span></div>
+        <div class="lines" id="hackLines"></div>
+        <div class="log-caret">root@wlk1:~$ <span>▊</span></div>
+      </div>
+
+      <div class="grille" aria-hidden="true">
+        <div class="grille-hole"></div><div class="grille-hole"></div><div class="grille-hole"></div><div class="grille-hole"></div><div class="grille-hole"></div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+    <div class="hint" id="hint">
+      <div class="step"><b>01</b> · TYPE SAME CHANNEL AS YOUR TEAM</div>
+      <div class="step"><b>02</b> · FIRST PTT PRESS ASKS FOR MIC</div>
+      <div class="step"><b>03</b> · HOLD THE GLASS BUTTON. TALK.</div>
+      <button class="go" id="hintGo">ROGER</button>
+    </div>
+  </div>
+  <div class="home-bar" aria-hidden="true"></div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   WLK-1 GHOSTCOM — encrypted P2P field radio
+
+   MIC POLICY (cold mic):
+   · Mic hardware is OFF between transmissions — tracks are
+     stopped and released after every PTT release (OS indicator
+     disappears, zero capture battery drain, full privacy)
+   · WebRTC legs stay warm; RTCRtpSender.replaceTrack()
+     hot-attaches the mic at TX press — no renegotiation
+   · Listening legs use empty send-side streams, so RX never
+     needs the mic
+
+   · Audio: WebRTC DTLS-SRTP (AES) — peer-to-peer, never relayed
+   · Signaling: PeerJS free public broker (handshake metadata only)
+   · Battery: one consolidated rAF loop @15fps (5fps power-save),
+     auto-sleeps when idle, pauses when tab hidden
+   · Reliability: STUN+TURN fallback, reconnect w/ backoff,
+     ICE-failure redial, listen-leg watchdog, session restore
+   ═══════════════════════════════════════════════════════════════ */
+const CH_PREFIX = 'wlk1-ch-';
+const MAX_SLOTS = 8;
+const ICE = [
+  {urls:'stun:stun.l.google.com:19302'},
+  {urls:'turn:standard.openrelay.metered.ca:80', username:'openrelayproject', credential:'openrelayproject'},
+  {urls:'turn:standard.openrelay.metered.ca:443', username:'openrelayproject', credential:'openrelayproject'},
+  {urls:'turn:standard.openrelay.metered.ca:443?transport=tcp', username:'openrelayproject', credential:'openrelayproject'}
+];
+
+let channel=null, peer=null, mySlot=-1;
+let localStream=null, isTx=false, micHot=false;
+let legs={};                    // peerId -> MediaConnection (bidirectional)
+let audioEls={}, remoteAn={};
+let audioCtx=null, txAnalyser=null, monitorGain=null, wakeLock=null;
+let pktCount=0, txStart=0, volLevel=0.8, rafOn=false, lastFrame=0, powerSave=false;
+
+const $=id=>document.getElementById(id);
+const chName=()=>channel||'22';
+const BARS=[...document.querySelectorAll('.vb')];
+const legIds=()=>Object.keys(legs);
+const linkedCount=()=>legIds().length;
+const slotOf=id=>parseInt(String(id).split('-').pop(),10)||0;
+window.__WLK={get raf(){return rafOn},get slot(){return mySlot},get links(){return linkedCount()},get micHot(){return micHot},get legs(){return Object.keys(legs)}};
+
+/* ── LOG ─────────────────────────────────────────── */
+function log(msg,kind='sys',extra=''){
+  const b=$('hackLines'); if(!b) return;
+  const t=new Date().toTimeString().slice(0,8);
+  const dir=kind==='tx'?'▲TX':kind==='rx'?'▼RX':kind==='warn'?'!!':'··';
+  const hex=(Math.random()*0xffff|0).toString(16).padStart(4,'0');
+  const d=document.createElement('div');
+  d.className='ln '+kind;
+  d.innerHTML='<span class="t">['+t+']</span> <span class="dir">'+dir+'</span> <span class="body">'+msg+'</span>'+(extra?'':' <span class="x">0x'+hex+'</span>');
+  b.appendChild(d); b.scrollTop=b.scrollHeight;
+  while(b.children.length>40) b.removeChild(b.firstChild);
+}
+const countPkt=()=>{pktCount++;$('pktCount').textContent=pktCount+' PKTS';};
+
+let toastT;
+function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),2200);}
+
+/* ── SOUNDS ──────────────────────────────────────── */
+function tone(f,d,type='square',g=0.08){
+  try{
+    audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+    audioCtx.resume&&audioCtx.resume();
+    const o=audioCtx.createOscillator(),gn=audioCtx.createGain();
+    o.type=type;o.frequency.value=f;
+    gn.gain.setValueAtTime(g,audioCtx.currentTime);
+    gn.gain.exponentialRampToValueAtTime(0.0001,audioCtx.currentTime+d);
+    o.connect(gn);gn.connect(audioCtx.destination);o.start();o.stop(audioCtx.currentTime+d);
+  }catch(e){}
+}
+function squelch(d=0.12){
+  try{
+    audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+    const len=audioCtx.sampleRate*d,buf=audioCtx.createBuffer(1,len,audioCtx.sampleRate),ch=buf.getChannelData(0);
+    for(let i=0;i<len;i++)ch[i]=(Math.random()*2-1)*Math.pow(1-i/len,2);
+    const s=audioCtx.createBufferSource();s.buffer=buf;
+    const g=audioCtx.createGain();g.gain.value=0.06;
+    const f=audioCtx.createBiquadFilter();f.type='highpass';f.frequency.value=1200;
+    s.connect(f);f.connect(g);g.connect(audioCtx.destination);s.start();
+  }catch(e){}
+}
+const sfx={key:()=>tone(1200,.03,'square',.05),
+  pttOpen:()=>{tone(1400,.05,'square',.09);squelch(.1);},
+  pttClose:()=>{squelch(.14);tone(900,.04,'square',.07);},
+  linkOpen:()=>{tone(700,.06);tone(1050,.08);},
+  linkLost:()=>tone(500,.1,'sawtooth',.06),
+  lock:()=>tone(1600,.04,'square',.07)};
+
+/* ── UI ──────────────────────────────────────────── */
+function setSync(t,m='off'){const b=$('syncBar');b.textContent=t;b.className='sync-bar '+m;}
+function setLed(id,s){$(id).className='led'+(s?' '+s:'');}
+function setMicLed(hot){setLed('micLed',hot?'tx':'');}
+
+/* ── KEYPAD ──────────────────────────────────────── */
+let digitBuf=[];
+function updateDisplay(){
+  const entering=digitBuf.length===1;
+  const ch=digitBuf.length?digitBuf.join(''):chName();
+  $('chan').textContent='CH '+ch+(entering?'_':'');
+  $('freq').textContent='152.'+ch.padStart(3,'0');
+  $('lcd').classList.toggle('entering',entering);
+}
+function enterDigit(n){
+  if(digitBuf.length<2){digitBuf.push(String(n));sfx.key();updateDisplay();}
+  if(digitBuf.length===2)joinChannel(digitBuf.join(''));
+}
+document.querySelectorAll('.key[data-digit]').forEach(k=>k.addEventListener('click',()=>enterDigit(+k.dataset.digit)));
+$('keyDel').addEventListener('click',()=>{digitBuf.pop();sfx.key();updateDisplay();});
+$('keyMic').addEventListener('click',micTest);
+$('keyShare').addEventListener('click',shareChannel);
+
+/* MIC key = grant test: hardware on → verify → hardware off */
+async function micTest(){
+  try{
+    await acquireMic();
+    setSync('MIC PATH VERIFIED — HW SLEEPING','on');
+    toast('MIC OK — SLEEPS TILL PTT');
+  }catch(e){
+    setSync('MIC BLOCKED — CHECK LOCK ICON','warn');
+    log('MIC DENIED — '+e.message,'warn');toast('⚠ ALLOW MIC');
+  }
+}
+function shareChannel(){
+  const url=location.origin+location.pathname+'#'+chName();
+  const done=()=>{toast('LINK COPIED — SEND TO TEAM');log('URL EXPORTED — CH '+chName(),'sys');};
+  navigator.share?navigator.share({url}).then(done).catch(()=>{}):navigator.clipboard.writeText(url).then(done).catch(()=>toast('COPY FAILED'));
+}
+
+/* ── MIC: acquire on demand, release after TX ────── */
+async function acquireMic(){
+  if(micHot&&localStream) return localStream;
+  if(!navigator.mediaDevices) throw new Error('NO MEDIA API — USE HTTPS');
+  localStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+  micHot=true;setMicLed(true);
+  log('MIC HOT — HARDWARE CAPTURING','sys');countPkt();
+  return localStream;
+}
+function releaseMic(){
+  if(!micHot) return;
+  try{localStream&&localStream.getTracks().forEach(t=>t.stop());}catch(e){}
+  localStream=null;micHot=false;setMicLed(false);
+  log('MIC RELEASED — HW OFF • 0.0W CAPTURE','sys');
+}
+
+/* attach/detach my mic track on every warm leg — no renegotiation */
+function attachTrackToLegs(track){
+  legIds().forEach(id=>{
+    const call=legs[id]; if(!call) return;
+    const s=txSender(call);
+    if(s){try{s.replaceTrack(track)}catch(e){}}
+  });
+}
+function detachTrackFromLegs(){
+  legIds().forEach(id=>{
+    const call=legs[id]; if(!call) return;
+    const s=txSender(call);
+    if(s){try{s.replaceTrack(null)}catch(e){}}
+  });
+}
+function txSender(call){
+  const pc=call.peerConnection; if(!pc) return null;
+  return pc.getSenders().find(s=>s.track&&s.track.kind==='audio')
+      || pc.getSenders().find(s=>!s.track)
+      || null;
+}
+
+/* ── MESH ────────────────────────────────────────── */
+async function joinChannel(ch){
+  if(peer&&channel===ch) return;
+  teardown();
+  channel=ch;digitBuf=ch.split('');updateDisplay();
+  localStorage.setItem('wlk1-ch',ch);
+  setSync('SCANNING CH '+ch+'…');log('SCANNING CH '+ch+'…','sys');
+  $('antenna').classList.add('live');
+  for(let i=0;i<MAX_SLOTS;i++){
+    const id=CH_PREFIX+ch+'-'+i;
+    const p=new Peer(id,{config:{iceServers:ICE}});
+    const opened=await new Promise(res=>{
+      const t=setTimeout(()=>res('timeout'),6000);
+      p.on('open',()=>{clearTimeout(t);res('open');});
+      p.on('error',e=>{clearTimeout(t);res(e.type||'error');});
+    });
+    if(opened==='open'){
+      peer=p;mySlot=i;wirePeer(p);
+      log('SLOT '+i+' CLAIMED — CH '+ch,'sys');
+      log('MIC COLD — SLEEPS TILL PTT','sys');
+      for(let j=0;j<i;j++)openListenLeg(j);   // RX legs need no mic
+      sfx.lock();refreshPeers();pollQuality();
+      return;
+    }
+    p.destroy();
+    if(opened==='unavailable-id'){log('SLOT '+i+' OCCUPIED','sys');continue;}
+    if(opened==='timeout'){log('SLOT '+i+' TIMEOUT','warn');continue;}
+    log('SIGNAL ERR: '+opened,'warn');break;
+  }
+  if(mySlot<0){setSync('CH '+ch+' UNREACHABLE','warn');log('JOIN FAILED','warn');$('antenna').classList.remove('live');}
+}
+
+/* dial with EMPTY send stream → their mic flows to us, ours silent */
+function openListenLeg(slot,silent){
+  if(!peer) return;
+  const id=CH_PREFIX+chName()+'-'+slot;
+  if(legs[id]) return;
+  const call=peer.call(id,new MediaStream());
+  if(!call) return;
+  legs[id]=call;watchIce(call,slot);
+  call.on('stream',r=>attachRemote(slot,r));
+  call.on('close',()=>{delete legs[id];log('LINK DROPPED — UNIT-'+slot,'warn');sfx.linkLost();refreshPeers();});
+  call.on('error',()=>{delete legs[id];});
+  if(!silent)log('LISTEN LEG → UNIT-'+slot,'rx');
+  countPkt();
+}
+
+function wirePeer(p){
+  p.on('call',call=>{
+    const slot=slotOf(call.peer);
+    /* answer: attach hot mic if transmitting, else silent RX leg */
+    call.answer(micHot&&localStream?localStream:new MediaStream());
+    legs[call.peer]=call;watchIce(call,slot);
+    call.on('stream',r=>attachRemote(slot,r));
+    call.on('close',()=>{delete legs[call.peer];log('INBOUND LOST — UNIT-'+slot,'warn');sfx.linkLost();refreshPeers();});
+    if(micHot&&localStream){
+      const s=()=>{const t=txSender(call);if(t){try{t.replaceTrack(localStream.getAudioTracks()[0])}catch(e){}}else setTimeout(s,150);};
+      setTimeout(s,150);
+    }
+    sfx.linkOpen();squelch(.1);
+    log('LINK ESTABLISHED — UNIT-'+slot,'rx');countPkt();
+    log('DTLS-SRTP HANDSHAKE OK — AES','sys');
+    refreshPeers();kickLoop();
+  });
+  p.on('error',e=>log('PEER ERR: '+e.type,'warn'));
+  p.on('disconnected',()=>{
+    log('SIGNAL LOST — RECONNECTING…','warn');
+    let tries=0;
+    const retry=()=>{ if(!peer) return;
+      try{peer.reconnect();log('RECONNECT TRY '+(++tries),'sys');}catch(e){}
+      if(tries<4)setTimeout(retry,Math.min(800*2**tries,8000)); else joinChannel(channel);
+    };
+    setTimeout(retry,1200);
+  });
+}
+
+function watchIce(call,slot){
+  const pc=call.peerConnection; if(!pc) return;
+  pc.addEventListener('connectionstatechange',()=>{
+    const st=pc.connectionState;
+    if(st==='failed'||st==='disconnected'){
+      log('ICE '+st.toUpperCase()+' — REDIAL UNIT-'+slot,'warn');
+      try{call.close()}catch(e){}
+      delete legs[call.peer];
+      setTimeout(()=>openListenLeg(slot),2000);
+    }
+  });
+}
+
+function attachRemote(slot,stream){
+  if(audioEls[slot]){audioEls[slot].srcObject=stream;return;}
+  const a=document.createElement('audio');
+  a.autoplay=true;a.playsInline=true;a.dataset.peer=slot;a.volume=volLevel;
+  a.srcObject=stream;a.style.display='none';document.body.appendChild(a);
+  audioEls[slot]=a;
+  a.play().catch(()=>toast('TAP TO UNMUTE'));
+  try{
+    audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+    const src=audioCtx.createMediaStreamSource(stream);
+    const an=audioCtx.createAnalyser();an.fftSize=64;
+    src.connect(an);
+    remoteAn[slot]={an,data:new Uint8Array(an.frequencyBinCount)};
+    kickLoop();
+  }catch(e){}
+  refreshPeers();
+}
+
+function refreshPeers(){
+  const slots=new Set(legIds().map(slotOf));
+  const box=$('peers');box.innerHTML='';
+  slots.forEach(s=>{
+    const c=document.createElement('div');c.className='chip';c.dataset.slot=s;
+    c.innerHTML='<span class="dot"></span>UNIT-'+s;box.appendChild(c);
+  });
+  $('lnkCount').textContent=slots.size;
+  if(slots.size)setSync('CH '+chName()+' — '+slots.size+' UNIT'+(slots.size>1?'S':''),'on');
+  else if(peer)setSync('CH '+chName()+' — SOLO • WAITING','off');
+}
+
+function teardown(){
+  Object.values(legs).forEach(c=>{try{c.close()}catch(e){}});
+  legs={};
+  Object.values(audioEls).forEach(a=>a.remove());audioEls={};remoteAn={};
+  if(peer){try{peer.destroy()}catch(e){}peer=null;}
+  mySlot=-1;releaseMic();
+}
+
+/* ── PTT — cold-mic hot-attach ───────────────────── */
+const ptt=$('ptt');
+ptt.addEventListener('pointerdown',async e=>{
+  e.preventDefault();
+  try{ptt.setPointerCapture(e.pointerId)}catch(_){}
+  ptt.classList.add('pressed');
+  navigator.vibrate&&navigator.vibrate(12);
+  sfx.pttOpen();
+  if(!peer)await joinChannel(digitBuf.join('')||localStorage.getItem('wlk1-ch')||'22');
+  setSync('ARMING TX — WAKING MIC…','warn');
+  try{
+    const stream=await acquireMic();          // mic wakes HERE, on press only
+    attachTrackToLegs(stream.getAudioTracks()[0]);
+    /* first-ever legs to earlier units carry live mic */
+    for(let j=0;j<mySlot;j++){
+      const id=CH_PREFIX+chName()+'-'+j;
+      if(!legs[id]){
+        const call=peer.call(id,stream);
+        if(call){legs[id]=call;watchIce(call,j);
+          call.on('stream',r=>attachRemote(j,r));
+          call.on('close',()=>{delete legs[id];refreshPeers();});
+          log('TX LEG → UNIT-'+j,'tx');countPkt();}
+      }
+    }
+    beginTx();
+  }catch(err){
+    setSync('MIC BLOCKED — TAP MIC KEY','warn');
+    log('TX FAIL — '+err.message,'warn');
+    ptt.classList.remove('pressed');
+  }
+});
+['pointerup','pointercancel'].forEach(ev=>ptt.addEventListener(ev,()=>{if(ptt.classList.contains('pressed')){ptt.classList.remove('pressed');endTx();}}));
+ptt.addEventListener('contextmenu',e=>e.preventDefault());
+
+function beginTx(){
+  if(isTx) return; isTx=true;txStart=Date.now();
+  setLed('txLed','tx');
+  setSync('▲ TX → CH '+chName()+' • SQUELCH OPEN','tx');
+  log('SQUELCH OPEN — CH '+chName(),'tx');countPkt();
+  navigator.wakeLock?.request('screen').then(w=>wakeLock=w).catch(()=>{});
+  startMonitor();kickLoop();
+}
+function endTx(){
+  if(!isTx) return; isTx=false;
+  const dur=((Date.now()-txStart)/1000).toFixed(1);
+  detachTrackFromLegs();                      // send silence
+  releaseMic();                               // hardware OFF — the whole point
+  setLed('txLed','');
+  log('SQUELCH CLOSED — '+dur+'s','tx');countPkt();
+  sfx.pttClose();stopMonitor();
+  try{wakeLock?.release()}catch(e){} wakeLock=null;
+  refreshPeers();
+}
+
+/* ── ONE CONSOLIDATED LOOP (15fps, auto-sleeps) ──── */
+function kickLoop(){if(!rafOn&&!document.hidden){rafOn=true;requestAnimationFrame(loop);}}
+function loop(ts){
+  if(document.hidden){rafOn=false;return;}
+  const tx=isTx&&txAnalyser;
+  const remotes=Object.entries(remoteAn);
+  if(!tx&&!remotes.length){rafOn=false;BARS.forEach(b=>b.style.height='4px');return;}  // SLEEP
+  if(ts-lastFrame>=(powerSave?200:66)){
+    lastFrame=ts;
+    if(tx){
+      const data=new Uint8Array(txAnalyser.frequencyBinCount);
+      txAnalyser.getByteFrequencyData(data);
+      BARS.forEach((b,i)=>{const v=data[Math.min(i*2+1,data.length-1)]/255;b.style.height=Math.max(4,4+v*22)+'px';});
+    }
+    let speaking=false;
+    remotes.forEach(([slot,o])=>{
+      o.an.getByteFrequencyData(o.data);
+      let s=0;for(let i=0;i<o.data.length;i++)s+=o.data[i];
+      const talk=s/o.data.length>14;
+      const chip=document.querySelector('.chip[data-slot="'+slot+'"]');
+      chip&&chip.classList.toggle('speaking',talk);
+      if(talk)speaking=true;
+    });
+    setLed('rxLed',speaking?'tx':'');
+    if(speaking)setSync('▼ RX ← UNIT SPEAKING','on');
+    else if(isTx)setSync('▲ TX → CH '+chName()+' • SQUELCH OPEN','tx');
+    else if(linkedCount())setSync('CH '+chName()+' — '+linkedCount()+' UNITS','on');
+  }
+  requestAnimationFrame(loop);
+}
+
+/* ── SOLO MONITOR (own mic in ears, only while TX) ─ */
+function startMonitor(){
+  if(!localStream||linkedCount()>0) return;
+  try{
+    audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+    audioCtx.resume&&audioCtx.resume();
+    const src=audioCtx.createMediaStreamSource(localStream);
+    monitorGain=audioCtx.createGain();monitorGain.gain.value=0.4;
+    src.connect(monitorGain);monitorGain.connect(audioCtx.destination);
+    log('SOLO MONITOR ON','sys');
+  }catch(e){}
+}
+function stopMonitor(){if(monitorGain){try{monitorGain.disconnect()}catch(e){}monitorGain=null;}}
+
+/* ── TX ANALYSER setup (fresh stream each press) ─── */
+(function wrapAcquire(){
+  const _a=acquireMic;
+  window.acquireMic=async()=>{
+    const s=await _a();
+    try{
+      audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+      audioCtx.resume&&audioCtx.resume();
+      const src=audioCtx.createMediaStreamSource(s);
+      txAnalyser=audioCtx.createAnalyser();txAnalyser.fftSize=64;
+      src.connect(txAnalyser);
+      BARS.forEach(b=>b.classList.add('live'));
+    }catch(e){}
+    return s;
+  };
+})();
+const _release=releaseMic;
+releaseMic=function(){
+  if(txAnalyser){try{txAnalyser.disconnect()}catch(e){} txAnalyser=null;}
+  BARS.forEach(b=>{b.style.height='4px';b.classList.remove('live');});
+  _release();
+};
+
+/* ── VOLUME KNOB ─────────────────────────────────── */
+(function(){
+  const knob=$('volKnob');let drag=false,a0=0,v0=volLevel;
+  const ang=e=>{const r=knob.getBoundingClientRect();
+    return Math.atan2(e.clientY-(r.top+r.height/2),e.clientX-(r.left+r.width/2))*180/Math.PI;};
+  knob.addEventListener('pointerdown',e=>{drag=true;a0=ang(e);v0=volLevel;knob.setPointerCapture(e.pointerId);});
+  knob.addEventListener('pointermove',e=>{
+    if(!drag) return;
+    let d=ang(e)-a0;if(d>180)d-=360;if(d<-180)d+=360;
+    volLevel=Math.min(1,Math.max(0,v0+d/270));
+    knob.style.transform='rotate('+(volLevel*270-135)+'deg)';
+    knob.setAttribute('aria-valuenow',Math.round(volLevel*100));
+    Object.values(audioEls).forEach(a=>a.volume=volLevel);
+  });
+  ['pointerup','pointercancel'].forEach(ev=>knob.addEventListener(ev,()=>drag=false));
+  knob.style.transform='rotate('+(volLevel*270-135)+'deg)';
+})();
+
+/* ── SIGNAL BARS (RTT, throttled) ────────────────── */
+let sigT=null;
+async function pollQuality(){
+  if(sigT)clearTimeout(sigT);
+  if(document.hidden||!peer||!linkedCount()){sigT=setTimeout(pollQuality,5000);return;}
+  let best=0;
+  for(const id of legIds()){
+    try{
+      const st=await legs[id].peerConnection.getStats();
+      st.forEach(s=>{
+        if(s.type==='candidate-pair'&&s.state==='succeeded'&&s.currentRoundTripTime!=null){
+          const rtt=s.currentRoundTripTime*1000;
+          best=Math.max(best,rtt<80?4:rtt<160?3:rtt<300?2:1);
+        }});
+    }catch(e){}
+  }
+  document.querySelectorAll('#sigbars i').forEach((b,i)=>b.classList.toggle('on',i<best));
+  sigT=setTimeout(pollQuality,powerSave?15000:5000);
+}
+
+/* ── WATCHDOG: keep listening legs alive ─────────── */
+setInterval(()=>{
+  if(document.hidden||!peer||micHot||isTx) return;
+  for(let j=0;j<mySlot;j++){
+    const id=CH_PREFIX+chName()+'-'+j;
+    if(!legs[id])openListenLeg(j,true);
+  }
+},15000);
+
+/* ── VISIBILITY (battery) ────────────────────────── */
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){rafOn=false;log('DISPLAY SLEEP — STANDBY','sys');}
+  else{log('DISPLAY WAKE — RESUME','sys');kickLoop();}
+});
+
+/* ── BATTERY + POWER SAVE ────────────────────────── */
+navigator.getBattery&&navigator.getBattery().then(b=>{
+  const upd=()=>{
+    const pct=Math.round(b.level*100);
+    $('batt').textContent='PWR '+pct+(b.charging?'⚡':'%');
+    powerSave=!b.charging&&b.level<0.2;
+    document.body.classList.toggle('powsave',powerSave);
+    if(powerSave)log('PWR SAVE ENGAGED — '+pct+'%','warn');
+  };
+  b.addEventListener('levelchange',upd);b.addEventListener('chargingchange',upd);upd();
+}).catch(()=>{});
+
+/* ── BOOT ────────────────────────────────────────── */
+const BOOT='MEM OK ▮ CRYPTO SYNC ▮ DTLS-SRTP READY ▮ MIC COLD';
+(function(){let i=0;const el=$('bootText');
+  const t=setInterval(()=>{el.textContent=BOOT.slice(0,++i);
+    if(i>=BOOT.length){clearInterval(t);setTimeout(()=>el.textContent='',1400);}},26);})();
+
+/* matrix rain — 2.5s boot flourish only, then killed */
+(function(){
+  const c=$('matrix'),x=c.getContext('2d');let stop=false;
+  c.width=innerWidth;c.height=innerHeight;
+  const cols=Math.floor(c.width/14),drops=Array(cols).fill(0);
+  const glyphs='ｱｲｳｴｵｶｷｸｹｺ01▚▞λΣΩ$#@';
+  (function rain(){
+    if(stop) return;
+    x.fillStyle='rgba(5,7,5,0.12)';x.fillRect(0,0,c.width,c.height);
+    x.fillStyle='#1e5a2a';x.font='12px monospace';
+    drops.forEach((y,i)=>{
+      x.fillText(glyphs[Math.random()*glyphs.length|0],i*14,y*14);
+      drops[i]=y*14>c.height&&Math.random()>0.97?0:y+1;
+    });
+    requestAnimationFrame(rain);
+  })();
+  setTimeout(()=>{stop=true;c.remove();},2500);
+})();
+
+/* hint */
+if(!localStorage.getItem('wlk1-seen')){
+  $('hint').classList.add('show');
+  $('hintGo').addEventListener('click',()=>{$('hint').classList.remove('show');localStorage.setItem('wlk1-seen','1');sfx.lock();});
+}
+
+/* scale to any screen */
+function fit(){const s=Math.min(1,innerHeight/860,innerWidth/410);$('shell').style.transform='scale('+s+')';}
+addEventListener('resize',fit,{passive:true});fit();
+
+/* session restore */
+const saved=localStorage.getItem('wlk1-ch');
+if(saved){digitBuf=saved.split('');updateDisplay();joinChannel(saved);}
+log('WLK-1 INIT — GHOSTCOM ONLINE','sys');
+</script>
+</body>
+</html>

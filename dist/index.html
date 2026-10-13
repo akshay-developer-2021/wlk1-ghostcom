@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!-- CSP: no inline scripts, no third-party script/style origins.
+      styles need 'unsafe-inline' for element.style writes (Vite dev too). -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob: mediastream:; connect-src 'self' wss: https: stun: turn: turns:; font-src 'self'; worker-src 'self' blob:;">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0c110a">
+<link rel="manifest" href="/manifest.webmanifest">
+<title>WLK-1 ▮ GHOSTCOM</title>
+  <script type="module" crossorigin src="/assets/index-BbOgkZUv.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/peerjs-Byv_Zjrn.js">
+  <link rel="stylesheet" crossorigin href="/assets/index-COgdRqaU.css">
+</head>
+<body>
+<canvas id="matrix" aria-hidden="true"></canvas>
+
+<div class="shell" id="shell">
+  <div class="notch" aria-hidden="true"></div>
+  <div class="screen">
+    <div class="radio">
+      <div class="col col-left">
+        <div class="top-bar">
+          <div>
+            <div class="model"><b>WLK-1 ▮ GHOSTCOM</b><span class="sub">E2E ENCRYPTED · P2P MESH · NO SERVER</span></div>
+          </div>
+          <div class="antenna" id="antenna" aria-label="Antenna"></div>
+          <div class="knob-wrap">
+            <div class="knob" id="volKnob" role="slider" aria-label="Volume" aria-valuemin="0" aria-valuemax="100" aria-valuenow="80" tabindex="0"></div>
+            <div class="knob-label">VOL</div>
+          </div>
+        </div>
+
+        <div class="lcd" id="lcd" aria-label="Radio display">
+          <div class="lcd-row1">
+            <div class="lcd-header">VHF · FM · P25</div>
+            <div class="enc">🔒 SRTP</div>
+          </div>
+          <div class="lcd-freq" id="freq">152.022</div>
+          <div class="lcd-meta">
+            <div class="lcd-chan" id="chan">CH --</div>
+            <div class="lnk">LNK <span id="lnkCount">0</span>
+              <span class="sigbars" id="sigbars" title="Link quality"><i></i><i></i><i></i><i></i></span>
+            </div>
+          </div>
+          <div class="lcd-boot"><span id="bootText"></span><span class="cursor"></span></div>
+        </div>
+
+        <div class="status-row" aria-label="Status">
+          <div class="status-led"><span class="led" id="txLed"></span> TX</div>
+          <div class="status-led"><span class="led" id="rxLed"></span> RX</div>
+          <div class="status-led"><span class="led on"></span> PWR</div>
+          <div class="status-led"><span class="led" id="micLed"></span> MIC</div>
+          <div class="batt" id="batt">PWR--</div>
+        </div>
+
+        <div class="sync-bar" id="syncBar" role="status" aria-live="polite">ENTER CHANNEL</div>
+
+        <div class="hack-log" role="log" aria-live="polite" aria-label="Traffic log">
+          <div class="head"><span>[ TRAFFIC ]</span><span id="pktCount">0 PKTS</span></div>
+          <div class="lines" id="hackLines"></div>
+          <div class="log-caret">root@wlk1:~$ <span>▊</span></div>
+        </div>
+
+        <div class="grille" aria-hidden="false">
+          <div class="grille-hole"></div><div class="grille-hole"></div><div class="grille-hole"></div><div class="grille-hole"></div><div class="grille-hole"></div>
+        </div>
+      </div>
+
+      <div class="col col-right">
+        <div class="keypad" aria-label="Keypad">
+          <button class="key" data-digit="1">1</button><button class="key" data-digit="2">2</button><button class="key" data-digit="3">3</button>
+          <button class="key" data-digit="4">4</button><button class="key" data-digit="5">5</button><button class="key" data-digit="6">6</button>
+          <button class="key" data-digit="7">7</button><button class="key" data-digit="8">8</button><button class="key" data-digit="9">9</button>
+          <button class="key" data-digit="0">0</button>
+          <button class="key util" id="keyDel">DEL</button>
+          <button class="key mic" id="keyMic">MIC</button>
+          <button class="key share" id="keyShare">📡 SHARE FREQUENCY</button>
+        </div>
+
+        <div class="peers" id="peers" aria-label="Linked units"></div>
+
+        <div class="voice-bars" id="voiceBars" aria-hidden="true">
+          <div class="vb"></div><div class="vb"></div><div class="vb"></div><div class="vb"></div>
+          <div class="vb"></div><div class="vb"></div><div class="vb"></div><div class="vb"></div><div class="vb"></div>
+        </div>
+
+        <div class="ptt-wrap">
+          <button class="ptt" id="ptt" aria-label="Push to talk (hold)" aria-pressed="false" tabindex="0"><span class="ring"></span><span class="inner"></span></button>
+          <div class="ptt-hint">HOLD TO TALK · SPACE ON DESKTOP</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status"></div>
+    <div class="hint" id="hint" role="dialog" aria-label="How to use">
+      <div class="step"><b>01</b> · TAP 📡 SHARE — SEND THE LINK TO YOUR TEAM</div>
+      <div class="step"><b>02</b> · THEY OPEN IT — INSTANTLY ON YOUR NET</div>
+      <div class="step"><b>03</b> · HOLD THE GLASS BUTTON. TALK. RELEASE.</div>
+      <div class="step" style="font-size:12px;color:#8aad7a">THE ROOM KEY RIDES IN THE LINK —<br>TYPING A CHANNEL NUMBER ALONE JOINS NOBODY</div>
+      <button class="go" id="hintGo">ROGER</button>
+    </div>
+  </div>
+  <div class="home-bar" aria-hidden="true"></div>
+</div>
+
+</body>
+</html>

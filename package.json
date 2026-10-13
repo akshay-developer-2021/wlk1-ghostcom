@@ -1,0 +1,23 @@
+{
+  "name": "wlk1-ghostcom",
+  "description": "WLK-1 GHOSTCOM — encrypted P2P field radio (production)",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "peerjs": "^1.5.4"
+  },
+  "devDependencies": {
+    "@fontsource/inter": "^5.1.0",
+    "@fontsource/vt323": "^5.1.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}
