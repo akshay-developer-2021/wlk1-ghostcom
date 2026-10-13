@@ -18,7 +18,7 @@ import { Peer, type DataConnection, type LogLevel } from 'peerjs';
 import { CONFIG, type AppConfig } from '../config.js';
 import { slotPeerId, callerSlot, sasCode } from '../core/crypto.js';
 import { set, state, setPeer, removePeer, clearPeers, linkedSlots } from '../core/state.js';
-import { silentStream, getSilentTrack } from '../audio/silentTrack.js';
+import { silentStream, getSilentTrack, silentContextRunning } from '../audio/silentTrack.js';
 import type { MicManager } from '../audio/mic.js';
 import type { Sfx } from '../audio/sfx.js';
 import type { E2EE } from '../security/e2ee.js';
@@ -139,6 +139,10 @@ export class Mesh {
            first-open-wins means slot 0 usually claims before the rest
            even start, so this rarely costs latency. */
         await new Promise<void>((r) => setTimeout(r, i * 150));
+        /* first-open-wins: a settled claim means our socket is up —
+           don't open (and then destroy) another broker socket. This is
+           what used to spray "WebSocket closed before established". */
+        if (claimed) return { slot: i, result: 'dropped' };
         const id = await slotPeerId(secret, channel, i);
         let p: Peer;
         try {
@@ -192,7 +196,7 @@ export class Mesh {
   /* FULL only if EVERY resolved non-timeout probe was unavailable-id
      (and at least one resolved); timeouts count as neither. */
   _diagnose(results: Array<{ result: string }>): 'full' | 'unreachable' {
-    const decided = results.filter((r) => r.result !== 'timeout');
+    const decided = results.filter((r) => r.result !== 'timeout' && r.result !== 'dropped');
     return decided.length > 0 && decided.every((r) => r.result === 'unavailable-id')
       ? 'full'
       : 'unreachable';
@@ -304,6 +308,14 @@ export class Mesh {
       const peer = this.peer;
       if (!peer || peer.destroyed) return;
       if (this.legs.has(id)) return;
+      /* Pre-gesture (or backgrounded) the shared audio context is locked.
+         Never build or resume it here — that logs a console warning AND
+         negotiates around a zero-frame source. Skip; the unlock handler
+         retries after the first tap, TX redial is the backstop. */
+      if (!silentContextRunning()) {
+        this.log(`UNIT-${slot} — AUDIO NOT READY, RETRY ON TAP`, 'warn');
+        return;
+      }
       const stream = silentStream();
       const tracks = typeof stream?.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
       if (!stream || tracks.length === 0) {
@@ -360,7 +372,10 @@ export class Mesh {
          rather than offering a trackless m-line that breaks negotiation. */
       const mic = this.mic;
       const liveMic: MediaStream | null = (state.tx && mic && mic.hot && mic.stream) || null;
-      const sil = liveMic ? null : silentStream();
+      /* Same gesture rule as dials: no ctx build/resume here (console
+         warning + dead source). Locked context → recvonly answer; the
+         TX-time redial upgrades the leg when the mic goes live. */
+      const sil = liveMic ? null : (silentContextRunning() ? silentStream() : null);
       const silTracks = typeof sil?.getAudioTracks === 'function' ? sil.getAudioTracks() : [];
       let recvonly = false;
       try {

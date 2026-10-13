@@ -22,6 +22,7 @@ vi.mock('peerjs', () => ({
 vi.mock('../src/audio/silentTrack.js', () => ({
   silentStream: () => 'STREAM_SENTINEL',
   getSilentTrack: () => 'TRACK_SENTINEL',
+  silentContextRunning: () => true,
 }));
 
 import { Mesh, onCrypto } from '../src/webrtc/mesh.js';

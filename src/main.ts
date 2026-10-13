@@ -1016,6 +1016,9 @@ function unlockAudio(): void {
   resumeSilentContext();
   try { replayAudio(); } catch { /* noop */ }
   try { mesh.retryPendingDials(); } catch { /* noop */ }
+  /* resume() is async — retry once it has had a beat to go live,
+     so the first tap already dials instead of the second. */
+  setTimeout(() => { try { mesh.retryPendingDials(); } catch { /* noop */ } }, 350);
 }
 window.addEventListener('pointerdown', unlockAudio, { capture: true });
 window.addEventListener('keydown', unlockAudio, { capture: true });
