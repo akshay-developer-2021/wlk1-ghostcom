@@ -12,14 +12,18 @@ export const CONFIG = {
     { urls: 'stun:global.stun.twilio.com:3478' },
     // Public OpenRelay is a best-effort fallback. For production run your
     // own coturn and use short-lived HMAC credentials (see README).
+    // turns: + credentialType are explicit for Safari, which prefers
+    // TLS TURN and strict RTCConfiguration parsing (Firefox/Safari).
     {
       urls: [
         'turn:standard.openrelay.metered.ca:80',
         'turn:standard.openrelay.metered.ca:443',
         'turn:standard.openrelay.metered.ca:443?transport=tcp',
+        'turns:standard.openrelay.metered.ca:443?transport=tcp',
       ],
       username: 'openrelayproject',
       credential: 'openrelayproject',
+      credentialType: 'password',
     },
   ],
   maxSlots: 8,

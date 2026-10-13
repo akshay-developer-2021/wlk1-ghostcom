@@ -21,26 +21,47 @@ export function bootSequence(lines) {
   }, 26);
 }
 
-/* matrix rain — continuous boot flourish; skipped for
-   reduced-motion and hidden tabs (wasted GPU otherwise) */
-export function matrixRain() {
+/* matrix rain — slow ambient backdrop (~12 fps drift); paused when the
+   tab is hidden, skipped for reduced-motion (battery/accessibility). */
+export function matrixRain({ fps = 12 } = {}) {
   if (REDUCED || document.hidden) { const c = $('matrix'); c?.remove(); return; }
   const c = $('matrix');
   if (!c) return;
   const x = c.getContext('2d');
-  c.width = innerWidth; c.height = innerHeight;
-  const cols = Math.floor(c.width / 14);
-  const drops = Array(cols).fill(0);
+  const size = () => { c.width = innerWidth; c.height = innerHeight; };
+  size();
+  const step = 16, interval = 1000 / fps;
+  let cols = Math.floor(c.width / step);
+  let drops = Array(cols).fill(0).map(() => Math.random() * -20);
   const glyphs = 'ｱｲｳｴｵｶｷｸｹｺ01▚▞λΣΩ$#@';
-  (function rain() {
-    x.fillStyle = 'rgba(5,7,5,0.12)'; x.fillRect(0, 0, c.width, c.height);
-    x.fillStyle = '#1e5a2a'; x.font = '12px monospace';
+  let last = 0, raf = 0, dead = false;
+  const onResize = () => {
+    size();
+    cols = Math.floor(c.width / step);
+    drops = Array(cols).fill(0).map(() => Math.random() * -20);
+  };
+  addEventListener('resize', onResize, { passive: true });
+  const onVis = () => {
+    if (document.hidden) { cancelAnimationFrame(raf); raf = 0; }
+    else if (!dead && !raf) { last = 0; raf = requestAnimationFrame(rain); }
+  };
+  document.addEventListener('visibilitychange', onVis);
+  function rain(t) {
+    raf = 0;
+    if (dead || document.hidden) return;
+    if (t - last < interval) { raf = requestAnimationFrame(rain); return; }
+    last = t;
+    x.fillStyle = 'rgba(5,7,5,0.10)';
+    x.fillRect(0, 0, c.width, c.height);
+    x.fillStyle = '#174a22'; x.font = '13px monospace';
     drops.forEach((y, i) => {
-      x.fillText(glyphs[(Math.random() * glyphs.length) | 0], i * 14, y * 14);
-      drops[i] = y * 14 > c.height && Math.random() > 0.97 ? 0 : y + 1;
+      const ch = glyphs[(Math.random() * glyphs.length) | 0];
+      x.fillText(ch, i * step, y * step);
+      drops[i] = y * step > c.height && Math.random() > 0.975 ? Math.random() * -10 : y + 1;
     });
-    requestAnimationFrame(rain);
-  })();
+    raf = requestAnimationFrame(rain);
+  }
+  raf = requestAnimationFrame(rain);
 }
 
 export function showHintOnce(seenKey = 'wlk1-seen') {

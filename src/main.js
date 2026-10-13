@@ -16,6 +16,7 @@ import { PowerManager } from './core/battery.js';
 import { MicManager } from './audio/mic.js';
 import { Sfx, HAPTIC } from './audio/sfx.js';
 import { Mesh, onQuality, onCrypto } from './webrtc/mesh.js';
+import { resumeSilentContext } from './audio/silentTrack.js';
 import { $, log, toast, setSync, countPkt } from './ui/dom.js';
 import { createPTT } from './ui/ptt.js';
 import { createLoop } from './ui/loop.js';
@@ -124,10 +125,41 @@ function setupKeypad() {
   $('keyMic').addEventListener('click', micTest);
   $('keyShare').addEventListener('click', shareChannel);
 
-  /* physical keyboard entry */
+  const inField = (t) => !!(t && t.closest && t.closest('input:not([type=range]), textarea, select, [contenteditable="true"]'));
+  const hintOpen = () => document.getElementById('hint')?.classList.contains('show');
+  const toggleHint = (show) => {
+    const h = $('hint');
+    if (!h) return;
+    const next = show ?? !h.classList.contains('show');
+    h.classList.toggle('show', next);
+  };
+
+  /* digits + utilities. Space/Enter PTT lives in ptt.js (no double-bind). */
   window.addEventListener('keydown', (e) => {
-    if (/^[0-9]$/.test(e.key) && !e.repeat && document.activeElement?.tagName !== 'INPUT') enterDigit(+e.key);
-    if (e.key === 'Backspace') { digitBuf.pop(); updateDisplay(); }
+    if (e.repeat || inField(e.target)) return;
+    const k = e.key;
+    if (/^[0-9]$/.test(k) && document.activeElement?.tagName !== 'INPUT') { enterDigit(+k); return; }
+    if (k === 'Backspace') { digitBuf.pop(); updateDisplay(); return; }
+    if (k === 'Escape') {
+      if (hintOpen()) toggleHint(false);
+      else { digitBuf = []; updateDisplay(); }
+      return;
+    }
+    const lk = k.toLowerCase();
+    if (lk === 't' && !hintOpen()) { e.preventDefault(); ptt.press(); return; } // laptop PTT alt
+    if (lk === 'm') { micTest(); return; }
+    if (lk === 's') { shareChannel(); return; }
+    if (lk === 'l') { copyAllLogs(); return; }
+    if (lk === 'h' || k === '?') { toggleHint(); return; }
+    if ((k === 'ArrowUp' || k === '+' || k === '=') && document.activeElement?.id !== 'volSlider') {
+      e.preventDefault(); nudgeVolume(5); return;
+    }
+    if ((k === 'ArrowDown' || k === '-' || k === '_') && document.activeElement?.id !== 'volSlider') {
+      e.preventDefault(); nudgeVolume(-5); return;
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key.toLowerCase() === 't') ptt.release();
   });
 }
 
@@ -282,33 +314,40 @@ onQuality((q) => {
   document.querySelectorAll('#sigbars i').forEach((b, i) => b.classList.toggle('on', i < q));
 });
 
-/* ── volume knob ──────────────────────────────────────────── */
-function setupKnob() {
-  const knob = $('volKnob');
-  let drag = false, a0 = 0, v0 = volLevel;
-  const ang = (e) => {
-    const r = knob.getBoundingClientRect();
-    return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)) * 180 / Math.PI;
-  };
-  knob.addEventListener('pointerdown', (e) => { drag = true; a0 = ang(e); v0 = volLevel; knob.setPointerCapture(e.pointerId); });
-  knob.addEventListener('pointermove', (e) => {
-    if (!drag) return;
-    let d = ang(e) - a0; if (d > 180) d -= 360; if (d < -180) d += 360;
-    volLevel = Math.min(1, Math.max(0, v0 + d / 270));
-    knob.style.transform = `rotate(${volLevel * 270 - 135}deg)`;
-    knob.setAttribute('aria-valuenow', Math.round(volLevel * 100));
+/* ── volume slider ────────────────────────────────────────
+   Native range input: free keyboard (arrows) + screen-reader support
+   on every browser. Fill var keeps the LCD-green level readable. */
+function setupVolume() {
+  const slider = $('volSlider');
+  const val = $('volVal');
+  if (!slider) return;
+  const apply = () => {
+    volLevel = Math.min(1, Math.max(0, Number(slider.value) / 100));
+    slider.style.setProperty('--vol-fill', `${Math.round(volLevel * 100)}%`);
+    if (val) val.textContent = String(Math.round(volLevel * 100));
     for (const [, a] of audioEls) a.volume = volLevel;
+  };
+  slider.value = String(Math.round(volLevel * 100));
+  apply();
+  slider.addEventListener('input', apply);
+  slider.addEventListener('change', () => {
+    localStorage.setItem('wlk1-vol', String(volLevel));
+    toast(`VOL ${Math.round(volLevel * 100)}`);
   });
-  ['pointerup', 'pointercancel'].forEach((ev) => knob.addEventListener(ev, () => {
-    drag = false; localStorage.setItem('wlk1-vol', String(volLevel));
-  }));
-  knob.style.transform = `rotate(${volLevel * 270 - 135}deg)`;
+}
+/* global volume nudge (slider focused → native arrows win, skip double-step) */
+function nudgeVolume(delta) {
+  const slider = $('volSlider');
+  if (!slider || document.activeElement === slider) return;
+  slider.value = String(Math.min(100, Math.max(0, Number(slider.value) + delta)));
+  slider.dispatchEvent(new Event('input', { bubbles: true }));
+  localStorage.setItem('wlk1-vol', String(volLevel));
 }
 
 /* ── boot ─────────────────────────────────────────────────── */
 initSession();
 setupKeypad();
-setupKnob();
+setupVolume();
 fit();
 addEventListener('resize', fit, { passive: true });
 bootSequence(['MEM OK', `CRYPTO ${E2EE.supported() ? 'E2EE-READY' : 'SRTP'}`, 'MIC COLD']);
@@ -316,8 +355,16 @@ matrixRain();
 showHintOnce();
 log(`WLK-1 INIT — GHOSTCOM ONLINE — ${E2EE.supported() ? 'E2EE SUPPORTED' : 'SRTP ONLY ON THIS BROWSER'}`, 'sys');
 
-/* first gesture unlocks audio (browser autoplay policy) */
-addEventListener('pointerdown', () => sfx.unlock(), { once: true, capture: true });
+/* gestures unlock audio (autoplay policy + Safari AudioContext).
+   Resumes the silent sender context and retries any lower-slot dials
+   that were skipped pre-gesture. Idempotent — safe on every tap/key. */
+function unlockAudio() {
+  try { sfx.unlock(); } catch { /* noop */ }
+  resumeSilentContext();
+  try { mesh.retryPendingDials(); } catch { /* noop */ }
+}
+addEventListener('pointerdown', unlockAudio, { capture: true });
+addEventListener('keydown', unlockAudio, { capture: true });
 
 /* PWA service worker */
 if ('serviceWorker' in navigator && location.protocol === 'https:') {

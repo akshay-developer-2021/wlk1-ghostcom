@@ -62,10 +62,19 @@ export class MicManager {
     if (this.hot && this.stream) {
       return { stream: this.stream, track: this.stream.getAudioTracks()[0], generation: gen };
     }
-    const stream = await this._gum({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: false,
-    });
+    /* Cross-browser constraints: echoCancellation is widely supported;
+       noiseSuppression / autoGainControl are ideal-only so Safari and
+       Firefox fall back instead of throwing OverconstrainedError. */
+    const tries = [
+      { audio: { echoCancellation: true, noiseSuppression: { ideal: true }, autoGainControl: { ideal: true } }, video: false },
+      { audio: { echoCancellation: true }, video: false },
+      { audio: true, video: false },
+    ];
+    let stream = null, lastErr = null;
+    for (const c of tries) {
+      try { stream = await this._gum(c); break; } catch (e) { lastErr = e; }
+    }
+    if (!stream) throw lastErr || new Error('MIC BLOCKED');
     if (gen !== this._gen) {                       // cancelled while awaiting HW
       stream.getTracks().forEach((t) => t.stop());
       throw new Error('MIC ACQUIRE CANCELLED');

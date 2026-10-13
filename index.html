@@ -25,9 +25,9 @@
             <div class="model"><b>WLK-1 ▮ GHOSTCOM</b><span class="sub">E2E ENCRYPTED · P2P MESH · NO SERVER</span></div>
           </div>
           <div class="antenna" id="antenna" aria-label="Antenna"></div>
-          <div class="knob-wrap">
-            <div class="knob" id="volKnob" role="slider" aria-label="Volume" aria-valuemin="0" aria-valuemax="100" aria-valuenow="80" tabindex="0"></div>
-            <div class="knob-label">VOL</div>
+          <div class="vol-wrap">
+            <div class="vol-head"><span class="vol-label">VOL</span><span class="vol-val" id="volVal">80</span></div>
+            <input class="vol-slider" id="volSlider" type="range" min="0" max="100" value="80" step="1" aria-label="Volume" />
           </div>
         </div>
 
@@ -87,7 +87,7 @@
 
         <div class="ptt-wrap">
           <button class="ptt" id="ptt" aria-label="Push to talk (hold)" aria-pressed="false" tabindex="0"><span class="ring"></span><span class="inner"></span></button>
-          <div class="ptt-hint">HOLD TO TALK · SPACE ON DESKTOP</div>
+          <div class="ptt-hint">HOLD TO TALK · SPACE / T ON DESKTOP</div>
         </div>
       </div>
     </div>
@@ -97,6 +97,7 @@
       <div class="step"><b>01</b> · TAP 📡 SHARE — SEND THE LINK TO YOUR TEAM</div>
       <div class="step"><b>02</b> · THEY OPEN IT — INSTANTLY ON YOUR NET</div>
       <div class="step"><b>03</b> · HOLD THE GLASS BUTTON. TALK. RELEASE.</div>
+      <div class="step" style="font-size:12px;color:#8aad7a">KEYS — T HOLD = TALK · M = MIC · S = SHARE · L = LOGS<br>↑/↓ = VOL · H = HELP · ESC = CLOSE</div>
       <div class="step" style="font-size:12px;color:#8aad7a">THE ROOM KEY RIDES IN THE LINK —<br>TYPING A CHANNEL NUMBER ALONE JOINS NOBODY</div>
       <button class="go" id="hintGo">ROGER</button>
       <button class="go" id="copyLogsBtn" style="margin-top:8px;background:#0e1720;border:1px solid #1a2528;color:#c5c7c8;padding:6px 12px;font-size:12px">COPY LOGS</button>

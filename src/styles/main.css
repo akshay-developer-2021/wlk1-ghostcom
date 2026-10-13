@@ -55,13 +55,21 @@ html,body{height:100%;background:#050705;font-family:'Inter',sans-serif;color:#d
   animation:ant-pulse 1s ease-in-out infinite;}
 .powsave .antenna.live::after{animation-duration:2.5s;}
 @keyframes ant-pulse{0%,100%{opacity:.3}50%{opacity:1}}
-.knob-wrap{text-align:center;flex-shrink:0;margin-left:8px;}
-.knob{width:46px;height:46px;border-radius:50%;cursor:grab;touch-action:none;
-  background:radial-gradient(circle at 35% 30%,#777,#333 70%);border:2px solid #222;
-  box-shadow:0 3px 8px rgba(0,0,0,0.5),inset 0 1px 2px rgba(255,255,255,0.2);position:relative;}
-.knob::after{content:'';position:absolute;top:3px;left:50%;transform:translateX(-50%);
-  width:3px;height:12px;background:#ddd;border-radius:2px;}
-.knob-label{font-family:'VT323',monospace;font-size:9px;color:#57654f;letter-spacing:2px;margin-top:3px;}
+.vol-wrap{text-align:right;flex-shrink:0;margin-left:8px;min-width:118px;}
+.vol-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;}
+.vol-label{font-family:'VT323',monospace;font-size:9px;color:#57654f;letter-spacing:2px;}
+.vol-val{font-family:'VT323',monospace;font-size:12px;color:var(--lcd-dim);min-width:3ch;text-align:right;}
+.vol-slider{-webkit-appearance:none;appearance:none;width:118px;height:26px;background:transparent;cursor:pointer;touch-action:pan-y;}
+.vol-slider::-webkit-slider-runnable-track{height:6px;border-radius:3px;
+  background:linear-gradient(90deg,var(--lcd) var(--vol-fill,80%),#232c1b var(--vol-fill,80%));
+  border:1px solid #1c2a16;}
+.vol-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:20px;margin-top:-8px;border-radius:4px;
+  background:linear-gradient(180deg,#5a6f4a,#3d4f34);border:1px solid #2d3a22;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.15),0 2px 5px rgba(0,0,0,0.5);}
+.vol-slider::-moz-range-track{height:6px;border-radius:3px;background:#232c1b;border:1px solid #1c2a16;}
+.vol-slider::-moz-range-progress{height:6px;border-radius:3px;background:var(--lcd);}
+.vol-slider::-moz-range-thumb{width:14px;height:18px;border-radius:4px;
+  background:linear-gradient(180deg,#5a6f4a,#3d4f34);border:1px solid #2d3a22;}
 /* ══════════ LCD ══════════ */
 .lcd{background:linear-gradient(180deg,#0e1a0c,#0a130a);border-radius:8px;padding:10px 12px;
   border:1px solid #1c2a16;box-shadow:inset 0 0 18px rgba(0,0,0,0.7),inset 0 0 40px rgba(184,255,168,0.04);

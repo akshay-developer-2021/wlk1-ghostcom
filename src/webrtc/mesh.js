@@ -190,12 +190,37 @@ export class Mesh {
   _dialListen(slot) {
     if (!this.peer || this.slot < 0) return;
     slotPeerId(state.secret, this.channel, slot).then((id) => {
+      if (!this.peer || this.peer.destroyed) return;
       if (this.legs.has(id)) return;
-      const call = this.peer.call(id, silentStream()); // guaranteed audio m-line
-      if (!call) return;
+      const stream = silentStream();
+      const tracks = typeof stream?.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
+      if (!stream || tracks.length === 0) {
+        // No sender available (AudioContext locked pre-gesture on Safari).
+        // Skip — watchdog / unlock handler retries after first tap.
+        this.log(`UNIT-${slot} — AUDIO NOT READY, RETRY ON TAP`, 'warn');
+        return;
+      }
+      let call = null;
+      try {
+        call = this.peer.call(id, stream); // guaranteed audio m-line
+      } catch (err) {
+        this.log(`DIAL UNIT-${slot} FAILED — ${err.message || err}`, 'warn');
+        return;
+      }
+      if (!call) { this.log(`DIAL UNIT-${slot} FAILED — NO CALL`, 'warn'); return; }
       this._registerLeg(call, slot, 'listen');
       this.log(`LISTEN LEG → UNIT-${slot}`, 'rx');
     }).catch(() => {});
+  }
+
+  /* Re-attempt lower-slot dials that were skipped for lack of an audio
+     sender (pre-gesture Safari). Safe to call on every unlock. */
+  retryPendingDials() {
+    if (!this.peer || this.slot < 0 || state.tx) return;
+    for (let j = 0; j < this.slot; j++) {
+      const has = [...this.legs.values()].some((l) => l.slot === j);
+      if (!has) this._dialListen(j);
+    }
   }
 
   _onInbound(call) {
@@ -209,9 +234,21 @@ export class Mesh {
         return;
       }
       /* Answer with the live mic ONLY while actually transmitting;
-         otherwise the silent track (muted-mic leak fix). */
+         otherwise the silent track (muted-mic leak fix). If the silent
+         context is still locked (pre-gesture Safari), answer recvonly
+         rather than offering a trackless m-line that breaks negotiation. */
       const txLive = state.tx && this.mic.hot && this.mic.stream;
-      call.answer(txLive ? this.mic.stream : silentStream());
+      const sil = txLive ? null : silentStream();
+      const silTracks = typeof sil?.getAudioTracks === 'function' ? sil.getAudioTracks() : [];
+      try {
+        if (txLive) call.answer(this.mic.stream);
+        else if (sil && silTracks.length) call.answer(sil);
+        else call.answer();
+      } catch (err) {
+        this.log(`ANSWER UNIT-${slot} FAILED — ${err.message || err}`, 'warn');
+        try { call.close(); } catch { /* noop */ }
+        return;
+      }
       this._registerLeg(call, slot, txLive ? 'live' : 'listen');
       this.log(`LINK ESTABLISHED — UNIT-${slot}`, 'rx');
       this.sfx?.linkOpen();
@@ -337,15 +374,33 @@ export class Mesh {
       pc.addEventListener('connectionstatechange', () => {
         const st = pc.connectionState;
         if (st === 'disconnected') {
-          /* transient — try ICE restart first (sub-second recovery) */
+          /* transient — try ICE restart first (sub-second recovery).
+             Safari often sticks in disconnected instead of failing, so
+             schedule a TX-safe redial if it never recovers. */
           this.log(`ICE BLIP — RESTARTING UNIT-${slot}`, 'warn');
           try { pc.restartIce?.(); } catch { /* noop */ }
-        } else if (st === 'failed') {
+          clearTimeout(call.__wlkDiscTimer);
+          call.__wlkDiscTimer = setTimeout(() => {
+            try {
+              const cur = pc.connectionState;
+              if ((cur === 'disconnected' || cur === 'failed') && this.legs.has(call.peer) && !state.tx) {
+                this.log(`ICE STUCK (${cur}) — REDIAL UNIT-${slot}`, 'warn');
+                try { call.close(); } catch { /* noop */ }
+                this.legs.delete(call.peer);
+                removePeer(slot);
+                setTimeout(() => this._dialListen(slot), 1500);
+              }
+            } catch { /* noop */ }
+          }, 5000);
+        } else if (st === 'failed' || st === 'closed') {
+          clearTimeout(call.__wlkDiscTimer);
           this.log(`ICE FAILED — REDIAL UNIT-${slot}`, 'warn');
           try { call.close(); } catch { /* noop */ }
           this.legs.delete(call.peer);
           removePeer(slot);
-          setTimeout(() => this._dialListen(slot), 1500);
+          if (!state.tx) setTimeout(() => this._dialListen(slot), 1500);
+        } else if (st === 'connected' || st === 'completed') {
+          clearTimeout(call.__wlkDiscTimer);
         }
       });
     };
