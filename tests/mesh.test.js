@@ -27,7 +27,7 @@ vi.mock('../src/audio/silentTrack.js', () => ({
 
 import { Mesh, onCrypto } from '../src/webrtc/mesh.js';
 import { silentStream } from '../src/audio/silentTrack.js';
-import { set, state, clearPeers } from '../src/core/state.js';
+import { set, state, clearPeers, linkedCount } from '../src/core/state.js';
 
 function makeMesh(e2ee = null) {
   const logs = [];
@@ -580,6 +580,83 @@ describe('ghost-redial circuit breaker', () => {
       mesh.leave();
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('linked means media-proven, not dialed', () => {
+  it('registering a leg does not light the chip until first media', () => {
+    const { mesh } = makeMesh();
+    const call = fakeCall('peer-5', fakeSender());
+    try {
+      mesh._registerLeg(call, 5, 'listen');
+      expect(linkedCount()).toBe(0);   // no phantom unit: no entry, no chip
+    } finally {
+      mesh.leave();
+    }
+  });
+
+  it('first remote stream lights the chip', () => {
+    const { mesh } = makeMesh();
+    const call = fakeCall('peer-5', fakeSender());
+    try {
+      mesh._registerLeg(call, 5, 'listen');
+      mesh._onRemoteStream(5, { id: 'remote-stream' });
+      expect(state.peers.get(5)?.linked).toBe(true);
+    } finally {
+      mesh.leave();
+    }
+  });
+
+  it('glare re-register of a streaming slot stays lit', () => {
+    const { mesh } = makeMesh();
+    const callA = fakeCall('peer-6', fakeSender());
+    mesh._registerLeg(callA, 6, 'listen');
+    mesh._onRemoteStream(6, { id: 'remote-stream' });
+    const callB = fakeCall('peer-6', fakeSender());
+    try {
+      mesh._registerLeg(callB, 6, 'listen');            // same id replaces A
+      expect(state.peers.get(6)?.linked).toBe(true);    // no flicker
+    } finally {
+      mesh.leave();
+    }
+  });
+});
+
+describe('seen faces follow room identity (channel+secret)', () => {
+  it('same-secret rejoin keeps faces; changed secret forgets them', async () => {
+    set({ secret: 'AAAAAAAAAAAAAAAA' });
+    const { mesh } = makeMesh();
+    const prevMax = mesh.cfg.maxSlots;
+    mesh.cfg.maxSlots = 1;
+    const created = [];
+    peerCtl.onCreate = (id, p) => created.push(p);
+    const openProbe = async () => {
+      await vi.waitFor(() => expect(created.length).toBe(1), { timeout: 2000 });
+      for (const cb of created[0].handlers['open'] ?? []) cb();
+    };
+    try {
+      let jp = mesh._join('22');
+      await openProbe();
+      expect((await jp).ok).toBe(true);
+      mesh._seenPeers.add(3);                           // a face from room life
+
+      created.length = 0;
+      jp = mesh._join('22');                            // same room rejoin
+      await openProbe();
+      await jp;
+      expect(mesh._seenPeers.has(3)).toBe(true);        // kept — sweep can heal
+
+      set({ secret: 'BBBBBBBBBBBBBBBB' });
+      created.length = 0;
+      jp = mesh._join('22');                            // same channel, NEW secret = new room
+      await openProbe();
+      await jp;
+      expect(mesh._seenPeers.size).toBe(0);             // strangers forgotten
+    } finally {
+      peerCtl.onCreate = null;
+      mesh.cfg.maxSlots = prevMax;
+      mesh.leave();
     }
   });
 });
