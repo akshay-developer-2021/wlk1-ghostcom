@@ -14,19 +14,23 @@ export class PowerManager {
   }
 
   init() {
-    /* battery + power-save */
-    this.nav.getBattery?.().then((b) => {
-      const upd = () => {
-        const pct = Math.round(b.level * 100);
-        const save = !b.charging && b.level < 0.2;
-        set({ powerSave: save });
-        this.doc.body.classList.toggle('powsave', save);
-        if (save) this._log(`PWR SAVE ENGAGED — ${pct}%`, 'warn');
-      };
-      b.addEventListener('levelchange', upd);
-      b.addEventListener('chargingchange', upd);
-      upd();
-    }).catch(() => {});
+    /* battery + power-save. getBattery doesn't exist on Firefox/Safari —
+       plain ?.() chaining would throw on .then and kill this module. */
+    try {
+      Promise.resolve(this.nav.getBattery?.()).then((b) => {
+        if (!b || typeof b.addEventListener !== 'function') return;
+        const upd = () => {
+          const pct = Math.round(b.level * 100);
+          const save = !b.charging && b.level < 0.2;
+          set({ powerSave: save });
+          this.doc.body.classList.toggle('powsave', save);
+          if (save) this._log(`PWR SAVE ENGAGED — ${pct}%`, 'warn');
+        };
+        b.addEventListener('levelchange', upd);
+        b.addEventListener('chargingchange', upd);
+        upd();
+      }).catch(() => {});
+    } catch { /* no Battery API — fine */ }
 
     /* visibility: hard-pause the render loop and low-value timers */
     this.doc.addEventListener('visibilitychange', () => {
