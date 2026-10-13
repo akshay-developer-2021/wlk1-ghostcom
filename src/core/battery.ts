@@ -33,6 +33,7 @@ export class PowerManager {
   private _log: LogFn;
   private _intervalTimers: Set<ReturnType<typeof setInterval>>;   // timers that must respect hidden state
   private _wakeLock: WakeLockSentinelLike | null;
+  private _battCb = new Set<(level: number, charging: boolean) => void>();
 
   constructor({ documentRef = document, navigatorRef = navigator, log = () => {} }: PowerManagerOptions = {}) {
     this.doc = documentRef;
@@ -41,6 +42,8 @@ export class PowerManager {
     this._intervalTimers = new Set();   // timers that must respect hidden state
     this._wakeLock = null;
   }
+
+  onBattery(cb: (level: number, charging: boolean) => void): void { this._battCb.add(cb); }
 
   init(): void {
     /* battery + power-save. getBattery doesn't exist on Firefox/Safari —
@@ -53,6 +56,7 @@ export class PowerManager {
           const save = !b.charging && b.level < 0.2;
           set({ powerSave: save });
           this.doc.body.classList.toggle('powsave', save);
+          for (const fn of this._battCb) fn(b.level, b.charging);
           if (save) this._log(`PWR SAVE ENGAGED — ${pct}%`, 'warn');
         };
         b.addEventListener('levelchange', upd);

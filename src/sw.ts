@@ -31,8 +31,23 @@ declare const self: SwGlobalScope;
 
 /* WLK-1 GHOSTCOM service worker — offline shell cache.
    Network-first for navigation (fresh app), cache-first for assets. */
-const CACHE = 'wlk1-v1';
+// bump on breaking cache changes
+const CACHE_VERSION = 'v2';
+const CACHE = `wlk1-${CACHE_VERSION}`;
+const RUNTIME_CAP = 60;
 const ASSETS: string[] = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg'];
+
+// Best-effort: keep the newest entries, drop the oldest beyond the cap.
+function trimRuntime(cache: Cache): Promise<void> {
+  return cache
+    .keys()
+    .then((keys) => {
+      if (keys.length <= RUNTIME_CAP) return;
+      const excess = keys.slice(0, keys.length - RUNTIME_CAP);
+      return Promise.all(excess.map((key) => cache.delete(key))).then(() => undefined);
+    })
+    .catch(() => undefined);
+}
 
 // Build-time precache manifest (app shell hashed assets).
 precacheAndRoute(self.__WB_MANIFEST);
@@ -83,7 +98,10 @@ self.addEventListener('fetch', (event) => {
           cached ??
           fetch(event.request).then((response) => {
             const copy = response.clone();
-            void caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+            void caches
+              .open(CACHE)
+              .then((cache) => cache.put(event.request, copy).then(() => trimRuntime(cache)))
+              .catch(() => undefined);
             return response;
           }),
       ),

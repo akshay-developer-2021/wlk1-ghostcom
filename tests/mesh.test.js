@@ -3,7 +3,22 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 /* Node-safe mocks: peerjs ships browser globals; silent track is faked.
    Distinct sentinels: silentStream feeds outbound dials, getSilentTrack
    feeds the endTx hot-swap — conflating them hid endTx regressions. */
-vi.mock('peerjs', () => ({ Peer: class { destroy() {} on() {} } }));
+const peerCtl = vi.hoisted(() => ({ onCreate: null }));
+vi.mock('peerjs', () => ({
+  Peer: class {
+    constructor(id, _opts) {
+      this.id = id;
+      this.handlers = {};
+      this.destroyed = false;
+      peerCtl.onCreate?.(id, this);
+    }
+    on(ev, cb) {
+      (this.handlers[ev] ??= []).push(cb);
+      return this;
+    }
+    destroy() { this.destroyed = true; }
+  },
+}));
 vi.mock('../src/audio/silentTrack.js', () => ({
   silentStream: () => 'STREAM_SENTINEL',
   getSilentTrack: () => 'TRACK_SENTINEL',
@@ -107,7 +122,7 @@ describe('E2EE capability negotiation', () => {
     expect(logs.some(([, m]) => m.includes('SRTP LEG'))).toBe(true);
   });
 
-  it('settle(true) with an engine arms encryption and reports e2ee', () => {
+  it('settle(true) with an engine arms encryption and reports e2ee', async () => {
     const e2ee = { secureSender: vi.fn().mockResolvedValue(), secureReceiver: vi.fn().mockResolvedValue() };
     const { mesh } = makeMesh(e2ee);
     const leg = fakeLeg(2, fakeSender());
@@ -115,9 +130,11 @@ describe('E2EE capability negotiation', () => {
     const statuses = [];
     onCrypto((s) => statuses.push(s));
     mesh._settleCrypto(leg, true);
+    await new Promise((r) => setTimeout(r, 0));   // arm attaches async
     expect(leg.crypto).toBe(true);
     expect(e2ee.secureSender).toHaveBeenCalled();
     expect(statuses).toContain('e2ee');
+    mesh.leave();
   });
 
   it('settle(false) marks the leg SRTP — no silent audio drop', () => {
@@ -130,7 +147,7 @@ describe('E2EE capability negotiation', () => {
     expect(e2ee.secureSender).not.toHaveBeenCalled();   // never garble their audio
   });
 
-  it('mixed room → "mixed" status, not a lying "e2ee" badge', () => {
+  it('mixed room → "mixed" status, not a lying "e2ee" badge', async () => {
     const e2ee = { secureSender: vi.fn().mockResolvedValue(), secureReceiver: vi.fn().mockResolvedValue() };
     const { mesh } = makeMesh(e2ee);
     const a = fakeLeg(0, fakeSender());
@@ -141,7 +158,9 @@ describe('E2EE capability negotiation', () => {
     onCrypto((s) => statuses.push(s));
     mesh._settleCrypto(a, true);
     mesh._settleCrypto(b, false);
+    await new Promise((r) => setTimeout(r, 0));   // arm attaches async
     expect(statuses[statuses.length - 1]).toBe('mixed');
+    mesh.leave();
   });
 });
 
@@ -282,5 +301,152 @@ describe('peer-unavailable — 3-strike ghost eviction', () => {
     expect(mesh.knownOccupied.has(5)).toBe(false);      // departed after 3 in a row
     expect(logs.some(([, m]) => m.includes('EVICTED AFTER 3 MISSES'))).toBe(true);
     mesh.leave();
+  });
+});
+
+describe('join — already-joined fast path', () => {
+  it('returns { ok: true, slot } instead of undefined', async () => {
+    const { mesh } = makeMesh();
+    mesh.peer = { destroyed: false };
+    mesh.channel = '22';
+    mesh.slot = 3;
+    try {
+      const r = await mesh.join('22');
+      expect(r).toEqual({ ok: true, slot: 3 });
+    } finally {
+      mesh.peer = null;
+      mesh.channel = null;
+      mesh.slot = -1;
+      mesh.leave();
+    }
+  });
+});
+
+describe('diagnosis — FULL only if EVERY resolved probe was unavailable-id', () => {
+  it('all unavailable-id → full', () => {
+    const { mesh } = makeMesh();
+    expect(mesh._diagnose([{ result: 'unavailable-id' }, { result: 'unavailable-id' }])).toBe('full');
+    mesh.leave();
+  });
+
+  it('single unavailable-id → full', () => {
+    const { mesh } = makeMesh();
+    expect(mesh._diagnose([{ result: 'unavailable-id' }])).toBe('full');
+    mesh.leave();
+  });
+
+  it('mixed unavailable + network → unreachable', () => {
+    const { mesh } = makeMesh();
+    expect(mesh._diagnose([{ result: 'unavailable-id' }, { result: 'network' }])).toBe('unreachable');
+    mesh.leave();
+  });
+
+  it('mixed unavailable + error → unreachable', () => {
+    const { mesh } = makeMesh();
+    expect(mesh._diagnose([{ result: 'unavailable-id' }, { result: 'error' }])).toBe('unreachable');
+    mesh.leave();
+  });
+
+  it('all timeouts → unreachable (timeouts count as neither)', () => {
+    const { mesh } = makeMesh();
+    expect(mesh._diagnose([{ result: 'timeout' }, { result: 'timeout' }])).toBe('unreachable');
+    mesh.leave();
+  });
+
+  it('unavailable + timeout → full (timeouts ignored)', () => {
+    const { mesh } = makeMesh();
+    expect(mesh._diagnose([{ result: 'unavailable-id' }, { result: 'timeout' }])).toBe('full');
+    mesh.leave();
+  });
+
+  it('empty → unreachable', () => {
+    const { mesh } = makeMesh();
+    expect(mesh._diagnose([])).toBe('unreachable');
+    mesh.leave();
+  });
+});
+
+describe('slot claim — race to FIRST open', () => {
+  it('wires the winner immediately without waiting for stragglers; late opens destroyed', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    const { mesh } = makeMesh();
+    const prevMax = mesh.cfg.maxSlots;
+    const prevProbe = mesh.cfg.slotProbeTimeoutMs;
+    mesh.cfg.maxSlots = 3;
+    mesh.cfg.slotProbeTimeoutMs = 2000;   // long backstop proves we did not wait
+    const created = [];
+    peerCtl.onCreate = (id, p) => created.push(p);
+    const wireSpy = vi.spyOn(mesh, '_wirePeer');
+    try {
+      const jp = mesh._join('22');
+      await vi.waitFor(() => expect(created.length).toBe(3), { timeout: 2000 });
+      for (const cb of created[0].handlers['open'] ?? []) cb();   // first open wins
+      await new Promise((r) => setTimeout(r, 20));                // claim microtasks run; stragglers still pending
+      expect(wireSpy).toHaveBeenCalledTimes(1);                   // claimed before the 2s backstop
+      for (let k = 1; k < created.length; k++) {
+        for (const cb of created[k].handlers['error'] ?? []) cb({ type: 'unavailable-id' });
+      }
+      await new Promise((r) => setTimeout(r, 20));                // straggler destroy microtasks run
+      const res = await jp;
+      expect(res.ok).toBe(true);
+      expect(mesh.peer).toBe(created[0]);
+      expect(created[0].destroyed).toBe(false);                   // winner kept
+      expect(created[1].destroyed).toBe(true);                    // losers destroyed as they resolve
+      expect(created[2].destroyed).toBe(true);
+    } finally {
+      wireSpy.mockRestore();
+      peerCtl.onCreate = null;
+      mesh.cfg.maxSlots = prevMax;
+      mesh.cfg.slotProbeTimeoutMs = prevProbe;
+      mesh.leave();
+    }
+  });
+});
+
+describe('SAS — per-peer prints pruned on leg close', () => {
+  it('drops the closed peer entry; SAS reflects current legs only', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    try {
+      const e2ee = { secureSender: vi.fn().mockResolvedValue(), secureReceiver: vi.fn().mockResolvedValue() };
+      const { mesh } = makeMesh(e2ee);
+      const callA = fakeCall('peer-0', fakeSender());
+      const callB = fakeCall('peer-1', fakeSender());
+      mesh._registerLeg(callA, 0, 'listen');
+      mesh._registerLeg(callB, 1, 'listen');
+      const pcA = { getStats: async () => new Map([['c1', { type: 'certificate', fingerprint: 'FP-A' }]]) };
+      const pcB = { getStats: async () => new Map([['c2', { type: 'certificate', fingerprint: 'FP-B' }]]) };
+      await mesh._collectSas(pcA, 'peer-0');
+      await mesh._collectSas(pcB, 'peer-1');
+      expect(mesh._sasPrints.get('peer-0')).toEqual(new Set(['FP-A']));
+      expect(mesh._sasPrints.get('peer-1')).toEqual(new Set(['FP-B']));
+      expect(typeof state.sas).toBe('string');                     // union of 2 → code set
+
+      callA.fire('close');                                        // leg close prunes its peer
+      expect(mesh._sasPrints.has('peer-0')).toBe(false);
+      expect(mesh._sasPrints.has('peer-1')).toBe(true);
+
+      callB.fire('error');                                        // error path prunes too
+      expect(mesh._sasPrints.has('peer-1')).toBe(false);
+      mesh.leave();
+    } finally {
+      set({ secret: null, sas: null });
+    }
+  });
+
+  it('stale prints from non-current legs never join the union', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    try {
+      const e2ee = { secureSender: vi.fn().mockResolvedValue(), secureReceiver: vi.fn().mockResolvedValue() };
+      const { mesh } = makeMesh(e2ee);
+      mesh._sasPrints.set('ghost-peer', new Set(['FP-GHOST']));
+      const callB = fakeCall('peer-1', fakeSender());
+      mesh._registerLeg(callB, 1, 'listen');
+      const pcB = { getStats: async () => new Map([['c2', { type: 'certificate', fingerprint: 'FP-B' }]]) };
+      await mesh._collectSas(pcB, 'peer-1');
+      expect(state.sas).toBeNull();                               // only 1 current print → threshold holds
+      mesh.leave();
+    } finally {
+      set({ secret: null, sas: null });
+    }
   });
 });

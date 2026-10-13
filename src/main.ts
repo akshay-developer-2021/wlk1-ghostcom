@@ -19,8 +19,9 @@ import './styles/main.css';
 import { CONFIG, BROKER_STORE_KEY } from './config.js';
 import {
   generateRoomSecret, isValidRoomSecret, normalizeRoomSecret,
-  parseChannelHash, buildShareLink,
+  parseChannelHash, buildShareLink, deriveSecretFromPassphrase,
 } from './core/crypto.js';
+export { deriveSecretFromPassphrase }; // KDF lives in core/crypto.ts; re-exported for any importer
 import { E2EE, deriveRawGroupKey } from './security/e2ee.js';
 import { set, state, on, linkedCount } from './core/state.js';
 import type { PeerInfo } from './core/state.js';
@@ -62,9 +63,15 @@ const meshRt: MeshRuntime = mesh as unknown as MeshRuntime;
 const ptt = createPTT({
   mesh, mic, sfx, power, config: CONFIG,
   onAnalyser: (s: MediaStream) => { const t = analyserFor(s); loop.registerTx(t.an, t.src); },
+  onTxEnd: () => loop.clearTx(),
+  isRadioActive: () => routeName === 'radio',
 });
 
 power.init();
+power.onBattery((level, charging) => {
+  const el = $('batt');
+  if (el) el.textContent = `PWR ${Math.round(level * 100)}%${charging ? ' CHG' : ''}`;
+});
 
 /* ── screens + hash router ────────────────────────────────── */
 type RouteName = 'radio' | 'join' | 'settings';
@@ -81,6 +88,14 @@ const VIEWS: Record<RouteName, string> = { radio: 'view-radio', join: 'view-join
 
 function showScreen(name: RouteName): void {
   if (routeName === 'radio' && name !== 'radio') clearWords(); // leaving the room: words never linger
+  if (routeName === 'radio' && name === 'join') {
+    // Leaving the room for Join: tear down live legs first so no ghost
+    // legs survive, then the key never lingers in state or the URL.
+    try { mesh.leave(); } catch { /* noop */ }
+    set({ secret: null });
+    const ch = typeof state.channel === 'string' && /^\d{2}$/.test(state.channel) ? state.channel : null;
+    history.replaceState(null, '', ch ? `#c=${ch}` : '#');
+  }
   routeName = name;
   for (const [k, id] of Object.entries(VIEWS) as [RouteName, string][]) {
     document.getElementById(id)?.classList.toggle('hidden', k !== name);
@@ -105,8 +120,9 @@ function validChannel(raw: string | null): string | null {
 
 /** Route the current hash. Radio entry boots the session lazily. */
 function route(): void {
-  const hash = location.hash;
-  if (hash === '#settings' || hash.startsWith('#settings')) {
+  const raw = location.hash;
+  const hash = raw.endsWith('.') ? raw.slice(0, -1) : raw;
+  if (/^#settings($|[?/])/.test(hash)) {
     showScreen('settings');
     refreshSettings();
     return;
@@ -198,7 +214,8 @@ async function joinRoom(channel: string, secret: string, persist: boolean): Prom
 async function initSession(): Promise<void> {
   if (radioStarted) return;
   radioStarted = true;
-  const fromHash = parseChannelHash(location.hash);
+  const hashRaw = location.hash;
+  const fromHash = parseChannelHash(hashRaw.endsWith('.') ? hashRaw.slice(0, -1) : hashRaw);
   if (fromHash?.channel && fromHash.secret) {
     const norm = normalizeRoomSecret(fromHash.secret);
     if (!isValidRoomSecret(norm)) {
@@ -281,21 +298,10 @@ async function rekeyE2EE(): Promise<void> {
 }
 
 /* ── passphrase → room secret ───────────────────────────────
-   Passphrase words live in sessionStorage only. Opt-in "remember"
-   persists the DERIVED secret (never the words) to localStorage. */
-const B32CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+   KDF lives in core/crypto.ts (deriveSecretFromPassphrase). Words live
+   in sessionStorage only (see clearWords); only the DERIVED secret may
+   persist via opt-in "remember". */
 const PASS_STORE_KEY = 'wlk1-pass';
-
-function bytesToSecret(bytes: Uint8Array): string {
-  let out = '';
-  let bits = 0, acc = 0;
-  for (const b of bytes) {
-    acc = (acc << 8) | b; bits += 8;
-    while (bits >= 5) { out += B32CROCKFORD.charAt((acc >>> (bits - 5)) & 31); bits -= 5; }
-  }
-  if (bits) out += B32CROCKFORD.charAt((acc << (5 - bits)) & 31);
-  return out;
-}
 
 export function passphraseStrength(pw: string): { score: number; label: string } {
   const words = pw.trim().split(/\s+/).filter(Boolean).length;
@@ -306,26 +312,6 @@ export function passphraseStrength(pw: string): { score: number; label: string }
   if (words >= 4 || pw.length >= 24) score++;
   const label = score <= 1 ? 'WEAK' : score === 2 ? 'OK' : score === 3 ? 'GOOD' : 'STRONG';
   return { score, label };
-}
-
-export async function deriveSecretFromPassphrase(pass: string, channel: string): Promise<string> {
-  const norm = pass.normalize('NFKC').trim(); // case-sensitive: no lowercasing
-  const salt = new TextEncoder().encode(`wlk1-v1-CH${channel}`);
-  // argon2id ONLY — deliberately NO PBKDF2 fallback. The two KDFs derive
-  // different secrets for the same input, so a silent fallback splits rooms.
-  // When the CSP blocks the wasm build this throws loudly instead.
-  try {
-    // DYNAMIC deep import — argon2-only UMD (~29K). The flat 'hash-wasm'
-    // ESM entry ships all 21 algorithms (~216K) and defeats treeshaking.
-    const { default: argon2 } = await import('hash-wasm/dist/argon2.umd.min.js');
-    const raw = await argon2.argon2id({
-      password: norm, salt, parallelism: 1, iterations: 2,
-      memorySize: 19456, hashLength: 10, outputType: 'binary',
-    });
-    return bytesToSecret(raw);
-  } catch {
-    throw new Error('KDF UNAVAILABLE — WASM BLOCKED');
-  }
 }
 
 /* ── recent rooms (derived secrets only, never passphrase words) */
@@ -362,6 +348,7 @@ function pushRecent(ch: string, secret: string | null): void {
     ? normalizeRoomSecret(secret) : null;
   const list = readRecents().filter((r) => r.ch !== ch);
   list.unshift({ ch, secret: clean, ts: Date.now() });
+  if (list.length > RECENT_MAX) log('RECENT DROPPED OLDEST', 'sys');
   safeSet(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX)));
 }
 
@@ -422,7 +409,7 @@ function setJoinMode(mode: JoinMode): void {
 function joinError(msg: string): void {
   const el = $('joinErr');
   if (el) el.textContent = msg;
-  if (msg) toast(msg);
+  if (msg) { toast(msg); setSync(msg, 'warn'); }
 }
 
 function setupJoin(): void {
@@ -572,7 +559,19 @@ function setupSettings(): void {
   $('setSave')?.addEventListener('click', () => {
     const host = $('setHost') instanceof HTMLInputElement
       ? ($('setHost') as HTMLInputElement).value.trim() : '';
-    safeSet(BROKER_STORE_KEY, JSON.stringify(host ? { host } : {}));
+    // Merge into the stored object: the screen edits host only, so any
+    // previously stored secure/port/path/key fields must survive the save.
+    let broker: Record<string, unknown> = {};
+    try {
+      const raw = safeGet(BROKER_STORE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (typeof parsed === 'object' && parsed !== null) broker = { ...(parsed as Record<string, unknown>) };
+      }
+    } catch { /* corrupt stored broker: save host alone */ }
+    if (host) broker['host'] = host;
+    else delete broker['host'];
+    safeSet(BROKER_STORE_KEY, JSON.stringify(broker));
     toast(host ? `BROKER SAVED — RELOAD TO APPLY` : 'BROKER CLEARED — RELOAD TO APPLY');
     log(`BROKER OVERRIDE ${host ? `SET → ${host}` : 'CLEARED'}`, 'sys');
   });
@@ -594,11 +593,11 @@ async function newIdentity(): Promise<void> {
   clearWords();
   const fresh = generateRoomSecret();
   set({ secret: fresh });
-  safeSet('wlk1-key', fresh);
+  if (sessionPersist) safeSet('wlk1-key', fresh);
   log('NEW IDENTITY — OLD LINK DEAD', 'warn');
   if (radioStarted && typeof state.channel === 'string') {
     try { mesh.leave(); } catch { /* noop */ }
-    await joinRoom(state.channel, fresh, true);
+    await joinRoom(state.channel, fresh, sessionPersist);
     syncRadioHash();
     toast('NEW IDENTITY — REJOINED, OLD LINK DEAD');
   } else {
@@ -694,14 +693,14 @@ function setupKeypad(): void {
     // particular not when #volSlider is focused.
     if (k === ' ' || k === 'Spacebar') return;
     if (/^[0-9]$/.test(k) && document.activeElement?.tagName !== 'INPUT') { void enterDigit(+k); return; }
-    if (k === 'Backspace') { digitBuf.pop(); updateDisplay(); return; }
+    if (k === 'Backspace') { if (!digitBuf.length) return; digitBuf.pop(); updateDisplay(); return; }
     if (k === 'Escape') {
       if (hintOpen()) toggleHint(false);
       else { digitBuf = []; updateDisplay(); }
       return;
     }
     const lk = k.toLowerCase();
-    if (lk === 't') { e.preventDefault(); ptt.press(undefined); return; } // laptop PTT alt
+    if (lk === 't') { e.preventDefault(); ptt.press('t'); return; } // laptop PTT alt
     if (lk === 'm') { void micTest(); return; }
     if (lk === 's') { shareChannel(); return; }
     if (lk === 'l') { copyAllLogs(); return; }
@@ -719,7 +718,7 @@ function setupKeypad(): void {
     if (e.repeat || inField(e.target)) return;
     if (hintOpen()) return;
     if (routeName !== 'radio') return;
-    if (e.key.toLowerCase() === 't') ptt.release();
+    if (e.key.toLowerCase() === 't') ptt.release('t');
   });
 }
 
@@ -921,8 +920,8 @@ on('sas', (v: unknown) => {
   const enc = document.querySelector('.enc');
   if (!enc || !code) return;
   enc.textContent = `🔒 E2E · ${code}`;
-  log(`CRYPTO SYNC — SAS ${code} — COMPARE WITH TEAM`, 'sys');
-  toast(`SAS ${code} — VERIFY WITH TEAM`);
+  log(`SAS ${code} — VERIFY ALOUD, MANUAL CHECK`, 'sys');
+  toast(`SAS ${code} — VERIFY ALOUD, MANUAL CHECK`);
 });
 on('e2eeMode', (v: unknown) => {
   const m = typeof v === 'string' ? v : '';

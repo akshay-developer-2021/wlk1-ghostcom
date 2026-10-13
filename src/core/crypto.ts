@@ -57,7 +57,7 @@ async function hmac(secret: string, message: string): Promise<Uint8Array> {
 /* PeerJS-safe ID: [A-Za-z0-9-_] only */
 function toIdBytes(u8: Uint8Array): string {
   let s = '';
-  for (const b of u8) s += B32.charAt(b & 31) + B32.charAt((b >> 5) & 7); // 13 chars / 8 bytes, url-safe alphabet
+  for (const b of u8) s += B32.charAt(b & 31) + B32.charAt((b >> 5) & 7); // 2 chars per byte: 8 input bytes → 16 chars, so slice(0, 20) never truncates
   return s.slice(0, 20);
 }
 
@@ -89,7 +89,7 @@ export async function callerSlot(
 }
 
 /**
- * SAS — 4 chars derived from the room secret + every leg's DTLS
+ * SAS — 6 chars derived from the room secret + every leg's DTLS
  * fingerprint. Peers compute the same code over the same inputs;
  * a MITM who swapped fingerprints changes the code.
  */
@@ -98,21 +98,8 @@ export async function sasCode(secret: string, fingerprints: Iterable<string>): P
     secret.toUpperCase(),
     'wlk1-sas:' + [...fingerprints].sort().join('|'),
   );
-  return toIdBytes(mac.subarray(0, 5)).slice(0, 4);
-}
-
-/** AES-GCM group key for the insertable-streams E2EE layer. */
-export async function deriveGroupKey(secret: string): Promise<CryptoKey> {
-  const base = await SUBTLE().importKey(
-    'raw', enc.encode(`wlk1-e2ee:${secret.toUpperCase()}`), 'PBKDF2', false, ['deriveKey'],
-  );
-  return SUBTLE().deriveKey(
-    { name: 'PBKDF2', salt: enc.encode('wlk1-salt-v1'), iterations: 120_000, hash: 'SHA-256' },
-    base,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt'],
-  );
+  // 4 HMAC bytes = 32 bits → 6 full-strength 5-bit chars (same alphabet as secrets).
+  return bytesToSecret(mac.subarray(0, 4)).slice(0, 6);
 }
 
 export interface ChannelHash {
@@ -133,4 +120,45 @@ export function buildShareLink(
   channel: string, secret: string, origin = 'https://wlk1.local/', path = '/',
 ): string {
   return `${origin.replace(/\/+$/, '')}${path}#${channel}.${secret}`;
+}
+
+/* ── passphrase → room secret ───────────────────────────────
+   Passphrase words live in sessionStorage only. Opt-in "remember"
+   persists the DERIVED secret (never the words) to localStorage. */
+
+/** Argon2 salt binding a passphrase to one channel (never reused). */
+export function passphraseSalt(channel: string): Uint8Array {
+  return enc.encode(`wlk1-v1-CH${channel}`);
+}
+
+/** 10 raw bytes → 16 Crockford chars (same alphabet as room secrets). */
+export function bytesToSecret(bytes: Uint8Array): string {
+  let out = '';
+  let bits = 0, acc = 0;
+  for (const b of bytes) {
+    acc = (acc << 8) | b; bits += 8;
+    while (bits >= 5) { out += B32.charAt((acc >>> (bits - 5)) & 31); bits -= 5; }
+  }
+  if (bits) out += B32.charAt((acc << (5 - bits)) & 31);
+  return out;
+}
+
+export async function deriveSecretFromPassphrase(pass: string, channel: string): Promise<string> {
+  const norm = pass.normalize('NFKC').trim(); // case-sensitive: no lowercasing
+  const salt = passphraseSalt(channel);
+  // argon2id ONLY — deliberately NO PBKDF2 fallback. The two KDFs derive
+  // different secrets for the same input, so a silent fallback splits rooms.
+  // When the CSP blocks the wasm build this throws loudly instead.
+  try {
+    // DYNAMIC deep import — argon2-only UMD (~29K). The flat 'hash-wasm'
+    // ESM entry ships all 21 algorithms (~216K) and defeats treeshaking.
+    const { default: argon2 } = await import('hash-wasm/dist/argon2.umd.min.js');
+    const raw = await argon2.argon2id({
+      password: norm, salt, parallelism: 1, iterations: 2,
+      memorySize: 19456, hashLength: 10, outputType: 'binary',
+    });
+    return bytesToSecret(raw);
+  } catch {
+    throw new Error('KDF UNAVAILABLE — WASM BLOCKED');
+  }
 }

@@ -27,14 +27,22 @@ export interface PttDeps {
   power: PowerManager;
   config: AppConfig;
   onAnalyser?: (stream: MediaStream) => void;
+  /** Fired at the end of the TX teardown branch (after dropWake) so the
+      owner can drop TX-scoped resources (e.g. loop.clearTx). Never fired
+      from abortArming — nothing armed there. */
+  onTxEnd?: () => void;
+  /** Gates the GLOBAL Space shortcut only; absent means active. */
+  isRadioActive?: () => boolean;
 }
 
 /** Concurrent TX owners. 'api' is the default for programmatic callers —
     including the laptop T-key path in main.ts, which calls press() /
-    release() with no holder argument. */
-export type PttHolder = 'pointer' | 'space' | 't' | 'api';
+    release() with no holder argument. 'enter' is the focused-button
+    Enter-hold path, kept separate from 'api' so the two never share
+    a refcount. */
+export type PttHolder = 'pointer' | 'space' | 't' | 'api' | 'enter';
 
-export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps) {
+export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, isRadioActive }: PttDeps) {
   const btn = req('ptt');
   let pressed = false;
   const holders = new Set<string>();
@@ -173,6 +181,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
       sfx.pttClose();
       sfx.roger();
       power.dropWake();
+      onTxEnd?.();
     } else {
       /* pressed but never armed (join failed / mic blocked) */
       sfx.pttClose();
@@ -224,11 +233,11 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
   btn.addEventListener('keydown', (e) => {
     if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
       e.preventDefault();
-      void press(e.key === 'Enter' ? 'api' : 'space');
+      void press(e.key === 'Enter' ? 'enter' : 'space');
     }
   });
   btn.addEventListener('keyup', (e) => {
-    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); release(e.key === 'Enter' ? 'api' : 'space'); }
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); release(e.key === 'Enter' ? 'enter' : 'space'); }
   });
 
   /* GLOBAL shortcut: hold SPACE anywhere = push to talk.
@@ -242,6 +251,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
   window.addEventListener('keydown', (e) => {
     if (e.code !== 'Space' && e.key !== ' ') return;
     if (e.repeat) return;
+    if (isRadioActive?.() === false) return;
     if (inTextField(e.target)) return;
     if (document.activeElement?.id === 'volSlider') return;   // native slider keys win
     if (document.getElementById('hint')?.classList.contains('show')) return;
@@ -250,6 +260,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
   });
   window.addEventListener('keyup', (e) => {
     if (e.code !== 'Space' && e.key !== ' ') return;
+    if (isRadioActive?.() === false) return;
     e.preventDefault();
     release('space');
   });

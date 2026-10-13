@@ -91,8 +91,6 @@ export function showHintOnce(seenKey = 'wlk1-seen'): void {
 export function fit(): void {
   const shell = $('shell');
   if (!(shell instanceof HTMLElement)) return;
-  const landscape = window.innerWidth > window.innerHeight * 1.2 && window.innerWidth > 700;
-  document.body.classList.toggle('wide', landscape);
   const s = Math.min(1, window.innerHeight / 860, window.innerWidth / 410);
   shell.style.transform = `scale(${s})`;
 }

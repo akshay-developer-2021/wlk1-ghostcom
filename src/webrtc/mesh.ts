@@ -54,7 +54,7 @@ export class Mesh {
   private _joinMutex: Promise<JoinResult | undefined> | null = null;
   private _rejoinInFlight: Promise<void> | null = null;
   private _destroyed = false;
-  private _sasPrints = new Set<string>();
+  private _sasPrints = new Map<string, Set<string>>();
   private _watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private _statsTimer: ReturnType<typeof setInterval> | null = null;
   private _txGen = 0;
@@ -73,7 +73,7 @@ export class Mesh {
   /* ── JOIN ──────────────────────────────────────────────── */
   async join(channel: string): Promise<JoinResult | undefined> {
     if (this._joinMutex) return this._joinMutex;
-    if (this.peer && this.channel === channel) return undefined;
+    if (this.peer && this.channel === channel) return { ok: true, slot: this.slot };
     this._joinMutex = this._join(channel).finally(() => { this._joinMutex = null; });
     return this._joinMutex;
   }
@@ -91,69 +91,106 @@ export class Mesh {
       return { ok: false, reason: 'no-secret' };
     }
 
-    /* PARALLEL slot claim: race all slots at once, first open wins. */
-    let sawUnavailable = false, sawNetworkError = false;
+    /* PARALLEL slot claim: race to FIRST open — claim immediately,
+       keep collecting stragglers only to destroy them as they resolve.
+       4s per-probe timeout stays as backstop. */
     interface SlotAttempt { slot: number; peer?: Peer; result: string }
+    let claimed = false;
+    let resolveClaim: (v: SlotAttempt | null) => void = () => {};
+    const claimP = new Promise<SlotAttempt | null>((res) => { resolveClaim = res; });
+    let allResults: SlotAttempt[] = [];
+    const destroyProbe = (r: SlotAttempt): void => {
+      if (r.peer) { try { r.peer.destroy(); } catch { /* noop */ } }
+    };
+    const doClaim = (r: SlotAttempt): boolean => {
+      if (claimed) return false;
+      if (this._destroyed || this.peer || !r.peer || r.peer.destroyed) return false;
+      claimed = true;
+      this.peer = r.peer;
+      this.slot = r.slot;
+      set({ mySlot: r.slot, joined: true, connected: true });
+      this.knownOccupied.clear();
+      this._wirePeer(this.peer);
+      this.log(`SLOT ${this.slot} CLAIMED — CH ${channel}`, 'sys');
+      for (let j = 0; j < this.slot; j++) this._dialListen(j);
+      this.sfx?.linkOpen();
+      this._startWatchdog();
+      resolveClaim(r);
+      return true;
+    };
+    const probeOpts = (): ConstructorParameters<typeof Peer>[1] => ({
+      config: { iceServers: this.cfg.iceServers },
+      debug: 0 as LogLevel,
+      ...(this.cfg.signaling.host
+        ? {
+            host: this.cfg.signaling.host,
+            secure: this.cfg.signaling.secure,
+            ...(this.cfg.signaling.port !== undefined ? { port: this.cfg.signaling.port } : {}),
+            ...(this.cfg.signaling.path !== undefined ? { path: this.cfg.signaling.path } : {}),
+            ...(this.cfg.signaling.key !== undefined ? { key: this.cfg.signaling.key } : {}),
+          }
+        : {}),
+    });
     const attempts: Array<Promise<SlotAttempt>> = [];
     for (let i = 0; i < this.cfg.maxSlots; i++) {
-      attempts.push((async (): Promise<SlotAttempt> => {
+      const pr: Promise<SlotAttempt> = (async (): Promise<SlotAttempt> => {
         const id = await slotPeerId(secret, channel, i);
         let p: Peer;
         try {
-          p = new Peer(id, {
-            config: { iceServers: this.cfg.iceServers },
-            debug: 0 as LogLevel,
-            ...(this.cfg.signaling.host
-              ? {
-                  host: this.cfg.signaling.host,
-                  secure: this.cfg.signaling.secure,
-                  ...(this.cfg.signaling.port !== undefined ? { port: this.cfg.signaling.port } : {}),
-                  ...(this.cfg.signaling.path !== undefined ? { path: this.cfg.signaling.path } : {}),
-                  ...(this.cfg.signaling.key !== undefined ? { key: this.cfg.signaling.key } : {}),
-                }
-              : {}),
-          });
+          p = new Peer(id, probeOpts());
         } catch { return { slot: i, result: 'error' }; }
         const result: string = await new Promise<string>((res) => {
           const t = setTimeout(() => res('timeout'), this.cfg.slotProbeTimeoutMs);
           p.on('open', () => { clearTimeout(t); res('open'); });
-          p.on('error', (e) => {
-            clearTimeout(t);
-            const type = e.type || 'error';
-            if (type === 'unavailable-id') sawUnavailable = true;
-            if (['network', 'server-error', 'socket-error'].includes(type)) sawNetworkError = true;
-            res(type);
-          });
+          p.on('error', (e) => { clearTimeout(t); res(e.type || 'error'); });
         });
         return { slot: i, peer: p, result };
-      })());
+      })().then(
+        (r) => {
+          if (r.result === 'open') {
+            if (!doClaim(r)) destroyProbe(r);   // late open past claim — destroy
+          } else {
+            destroyProbe(r);
+          }
+          return r;
+        },
+        () => ({ slot: i, result: 'error' } as SlotAttempt),
+      );
+      attempts.push(pr);
     }
 
-    const results = await Promise.all(attempts);
-    const winner = results.find((r) => r.result === 'open' && r.peer);
-    for (const r of results) {                    // destroy losers immediately
-      if (r !== winner && r.peer) { try { r.peer.destroy(); } catch { /* noop */ } }
+    void Promise.all(attempts).then((all) => {
+      allResults = all;
+      if (!claimed) resolveClaim(null);
+    });
+
+    const first = await claimP;
+    if (first && claimed) {
+      if (this._destroyed || this.peer !== first.peer) {
+        if (this._destroyed) return { ok: false, reason: 'destroyed' };
+        return { ok: false, reason: 'superseded' };
+      }
+      return { ok: true, slot: this.slot };
     }
 
-    if (!winner || !winner.peer) {
-      const reason = sawUnavailable && !sawNetworkError ? 'full' : 'unreachable';
+    if (this._destroyed) return { ok: false, reason: 'destroyed' };
+    {
+      const reason = this._diagnose(allResults);
       this.log(reason === 'full'
         ? `CH ${channel} FULL — ALL ${this.cfg.maxSlots} SLOTS`
         : 'SIGNAL UNREACHABLE', 'warn');
       set({ joined: false });
       return { ok: false, reason };
     }
+  }
 
-    this.peer = winner.peer;
-    this.slot = winner.slot;
-    set({ mySlot: winner.slot, joined: true, connected: true });
-    this.knownOccupied.clear();
-    this._wirePeer(this.peer);
-    this.log(`SLOT ${this.slot} CLAIMED — CH ${channel}`, 'sys');
-    for (let j = 0; j < this.slot; j++) this._dialListen(j);
-    this.sfx?.linkOpen();
-    this._startWatchdog();
-    return { ok: true, slot: this.slot };
+  /* FULL only if EVERY resolved non-timeout probe was unavailable-id
+     (and at least one resolved); timeouts count as neither. */
+  _diagnose(results: Array<{ result: string }>): 'full' | 'unreachable' {
+    const decided = results.filter((r) => r.result !== 'timeout');
+    return decided.length > 0 && decided.every((r) => r.result === 'unavailable-id')
+      ? 'full'
+      : 'unreachable';
   }
 
   leave(keepFlag = false): void {
@@ -189,7 +226,8 @@ export class Mesh {
            knownOccupied only after 3 consecutive strikes (a lone
            miss can be a broker race, not a departure). */
         const m = /peer ([\w-]+)/.exec(e.message || '');
-        const id = m?.[1];
+        let id = m?.[1];
+        if (!id) id = /wlk1-[A-Za-z0-9]+/.exec(e.message || '')?.[0];
         if (id && this.legs.has(id)) {
           const leg = this.legs.get(id);
           if (leg) {
@@ -363,6 +401,7 @@ export class Mesh {
       clearTimeout(leg._neverTimer);
       try { clearTimeout(call.__wlkDiscTimer); } catch { /* noop */ }
       this.legs.delete(id);
+      this._sasPrints.delete(id);
       this._closeDataConnFor(id);
       removePeer(slot);
       this.log(`LINK DROPPED — UNIT-${slot}`, 'warn');
@@ -375,6 +414,7 @@ export class Mesh {
       clearTimeout(leg._neverTimer);
       try { clearTimeout(call.__wlkDiscTimer); } catch { /* noop */ }
       this.legs.delete(id);
+      this._sasPrints.delete(id);
       this._closeDataConnFor(id);
       removePeer(slot);
       this._emitCrypto();
@@ -482,6 +522,8 @@ export class Mesh {
   /* inbound DataChannel from a peer that initiated negotiation */
   _onDataConn(conn: DataConnection): void {
     const leg = this.legs.get(conn.peer);
+    const prev = this._dataConns.get(conn.peer);
+    if (prev && prev !== conn) { try { prev.close(); } catch { /* noop */ } }
     this._dataConns.set(conn.peer, conn);
     if (leg) {
       this._wireCryptoConn(conn, leg);
@@ -511,22 +553,36 @@ export class Mesh {
     const e2ee = this.e2ee;
     const capable = remoteCapable && !!e2ee;
     if (leg.crypto !== capable) {
-      leg.crypto = capable;
       if (capable && e2ee) {
+        // Badge stays pending until the transforms actually attach.
+        const arm = (pc: RTCPeerConnection): void => {
+          void this._armE2ee(pc, e2ee, leg.slot).then(() => {
+            if (this._destroyed) return;
+            if (this.legs.get(leg.call.peer) !== leg) return;
+            leg.crypto = true;
+            this.log(`UNIT-${leg.slot} — E2EE AES-GCM ARMED`, 'sys');
+            this._emitCrypto();
+          }).catch(() => {
+            if (this._destroyed) return;
+            if (this.legs.get(leg.call.peer) !== leg) return;
+            leg.crypto = false;
+            this.log(`UNIT-${leg.slot} — E2EE UNAVAILABLE (attach failed) — SRTP LEG`, 'warn');
+            this._emitCrypto();
+          });
+        };
         const pc = leg.call.peerConnection as RTCPeerConnection | null | undefined;
         if (pc) {
-          this._armE2ee(pc, e2ee, leg.slot);
+          arm(pc);
         } else {
           /* peerConnection not exposed yet (glare/renegotiation race) —
              poll briefly before downgrading the leg to SRTP. */
           let tries = 0;
           const poll = (): void => {
             if (this._destroyed) return;
-            if (!this.legs.has(leg.call.peer)) return;
+            if (this.legs.get(leg.call.peer) !== leg) return;
             const p = leg.call.peerConnection as RTCPeerConnection | null | undefined;
             if (p) {
-              this._armE2ee(p, e2ee, leg.slot);
-              this._emitCrypto();
+              arm(p);
               return;
             }
             tries++;
@@ -541,18 +597,21 @@ export class Mesh {
           setTimeout(() => { if (!this._destroyed) poll(); }, 250);
         }
       } else {
+        leg.crypto = capable;
         this.log(`UNIT-${leg.slot} — E2EE UNAVAILABLE (${why}) — SRTP LEG`, 'warn');
       }
     }
     this._emitCrypto();
   }
 
-  private _armE2ee(pc: RTCPeerConnection, e2ee: E2EE, slot: number): void {
-    const s = this._senderFor(pc);
-    if (s) e2ee.secureSender(s).catch(() => {});
-    for (const r of pc.getReceivers()) e2ee.secureReceiver(r).catch(() => {});
-    pc.addEventListener('track', (ev) => { e2ee.secureReceiver(ev.receiver).catch(() => {}); });
-    this.log(`UNIT-${slot} — E2EE AES-GCM ARMED`, 'sys');
+  private _armE2ee(pc: RTCPeerConnection, e2ee: E2EE, _slot?: number): Promise<void> {
+    const run = async (): Promise<void> => {
+      const s = this._senderFor(pc);
+      if (s) await e2ee.secureSender(s);
+      for (const r of pc.getReceivers()) await e2ee.secureReceiver(r);
+      pc.addEventListener('track', (ev) => { e2ee.secureReceiver(ev.receiver).catch(() => {}); });
+    };
+    return run();
   }
 
   _emitCrypto(): void {
@@ -561,6 +620,7 @@ export class Mesh {
     if (!this.e2ee) status = 'srtp-only';
     else if (!legs.length) status = 'ready';
     else if (legs.every((l) => l.crypto === true)) status = 'e2ee';
+    else if (legs.some((l) => l.crypto == null)) status = 'pending';
     else if (legs.some((l) => l.crypto === false)) status = 'mixed';
     else status = 'pending';
     emitCrypto(status);
@@ -585,13 +645,13 @@ export class Mesh {
       pc.addEventListener('iceconnectionstatechange', () => {
         const st = (pc as RTCPeerConnection & { iceConnectionState?: string }).iceConnectionState;
         if (st === 'connected' || (st as string) === 'completed') {
-          if (!markDone()) void this._collectSas(pc);
+          if (!markDone()) void this._collectSas(pc, call.peer as string);
         }
       });
       pc.addEventListener('connectionstatechange', () => {
         const st = pc.connectionState;
         if (st === 'connected' || (st as string) === 'completed') {
-          if (!markDone()) void this._collectSas(pc);
+          if (!markDone()) void this._collectSas(pc, call.peer as string);
         }
       });
     };
@@ -806,15 +866,30 @@ export class Mesh {
   }
 
   /* ── SAS (DTLS fingerprint verification code) ──────────── */
-  async _collectSas(pc: any): Promise<void> {
+  /* Per-peer prints: SAS is computed over the union of prints
+     belonging to CURRENT legs only; a peer's entry is dropped when
+     its leg closes/errors. */
+  async _collectSas(pc: any, peerId?: string): Promise<void> {
     if (!this.e2ee) return;
     try {
       const stats = await pc.getStats();
+      const fresh = new Set<string>();
       stats.forEach((s: { type?: string; fingerprint?: string }) => {
-        if (s.type === 'certificate' && s.fingerprint) this._sasPrints.add(s.fingerprint);
+        if (s.type === 'certificate' && s.fingerprint) fresh.add(s.fingerprint);
       });
-      if (this._sasPrints.size >= 2) {
-        const code = await sasCode(state.secret ?? '', [...this._sasPrints]);
+      if (peerId) {
+        const cur = this._sasPrints.get(peerId) ?? new Set<string>();
+        for (const f of fresh) cur.add(f);
+        this._sasPrints.set(peerId, cur);
+      }
+      const union = new Set<string>();
+      for (const [pid, prints] of this._sasPrints) {
+        if (!this.legs.has(pid)) continue;   // stale entry — not a current leg
+        for (const f of prints) union.add(f);
+      }
+      if (!peerId) for (const f of fresh) union.add(f);
+      if (union.size >= 2) {
+        const code = await sasCode(state.secret ?? '', [...union]);
         set({ sas: code });
       }
     } catch { /* noop */ }

@@ -64,15 +64,26 @@ describe('callerSlot — inbound call authentication', () => {
 });
 
 describe('SAS — fingerprint verification code', () => {
-  it('same inputs → same code, tampered fingerprints → different code', async () => {
+  it('is 6 Crockford chars', async () => {
+    expect(await sasCode('ABC234', ['AA:BB', 'CC:DD']))
+      .toMatch(/^[0123456789ABCDEFGHJKMNPQRSTVWXYZ]{6}$/);
+  });
+
+  it('is deterministic (same inputs → same code)', async () => {
     const s = 'ABC234';
     const fps = ['AA:BB', 'CC:DD'];
-    const a = await sasCode(s, fps);
-    const b = await sasCode(s, [...fps]);
-    expect(a).toBe(b);
-    expect(a).toHaveLength(4);
-    const mitm = await sasCode(s, ['AA:BB', 'FF:EE']);
-    expect(mitm).not.toBe(a);
+    expect(await sasCode(s, [...fps])).toBe(await sasCode(s, [...fps]));
+  });
+
+  it('is order-independent (sorted legs)', async () => {
+    expect(await sasCode('ABC234', ['AA:BB', 'CC:DD']))
+      .toBe(await sasCode('ABC234', ['CC:DD', 'AA:BB']));
+  });
+
+  it('is tamper-sensitive (swapped fingerprint → different code)', async () => {
+    const s = 'ABC234';
+    const a = await sasCode(s, ['AA:BB', 'CC:DD']);
+    expect(await sasCode(s, ['AA:BB', 'FF:EE'])).not.toBe(a);
   });
 });
 
