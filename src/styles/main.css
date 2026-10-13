@@ -258,7 +258,30 @@ html,body{height:100%;background:#050705;font-family:'Inter',sans-serif;color:#d
 .panel-head .model .sub{font-size:11px;}
 /* join hero: big flickering brand + live eq bars, centered device column */
 .panel-view{align-items:center;}
-.panel-view>*{width:100%;max-width:330px;}
+.panel-view>*{width:100%;max-width:330px;position:relative;z-index:1;}
+/* join backdrop: dark base + aurora wash + blueprint grid (fx lives under content) */
+.panel-view.join{overflow:hidden;background:linear-gradient(180deg,#0d160a 0%,#080f06 100%);}
+.panel-view.join::before{content:'';position:absolute;inset:0;z-index:0;pointer-events:none;
+  background-image:linear-gradient(rgba(184,255,168,0.07) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(184,255,168,0.07) 1px,transparent 1px);
+  background-size:26px 26px;
+  -webkit-mask-image:radial-gradient(85% 70% at 50% 28%,#000 25%,transparent 100%);
+  mask-image:radial-gradient(85% 70% at 50% 28%,#000 25%,transparent 100%);}
+.panel-view>.aurora{position:absolute;inset:-20%;width:auto;max-width:none;z-index:0;pointer-events:none;
+  filter:blur(50px);opacity:.55;}
+.aurora i{position:absolute;width:55%;aspect-ratio:1;border-radius:50%;}
+.aurora i:nth-child(1){left:-10%;top:-5%;background:radial-gradient(circle,rgba(184,255,168,0.22),transparent 70%);
+  animation:drift1 16s ease-in-out infinite alternate;}
+.aurora i:nth-child(2){right:-15%;top:32%;background:radial-gradient(circle,rgba(232,62,140,0.15),transparent 70%);
+  animation:drift2 21s ease-in-out infinite alternate;}
+.aurora i:nth-child(3){left:20%;bottom:-15%;background:radial-gradient(circle,rgba(0,255,249,0.11),transparent 70%);
+  animation:drift1 26s ease-in-out infinite alternate-reverse;}
+@keyframes drift1{from{transform:translate(0,0) scale(1)}to{transform:translate(12%,8%) scale(1.15)}}
+@keyframes drift2{from{transform:translate(0,0) scale(1.1)}to{transform:translate(-10%,-6%) scale(1)}}
+.powsave .aurora{display:none;}
+#joinBtn{animation:joinPulse 2.4s ease-in-out infinite;}
+@keyframes joinPulse{0%,100%{box-shadow:0 0 12px rgba(184,255,168,0.25)}50%{box-shadow:0 0 28px rgba(184,255,168,0.55)}}
+.powsave #joinBtn{animation:none;}
 .join-hero{text-align:center;padding:10px 0 2px;position:relative;}
 .join-hero::after{content:'';display:block;height:1px;margin:12px auto 0;max-width:220px;
   background:linear-gradient(90deg,transparent,rgba(184,255,168,0.5),transparent);}
