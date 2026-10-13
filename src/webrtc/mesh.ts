@@ -372,13 +372,29 @@ export class Mesh {
   _wireCryptoConn(conn: DataConnection, leg: Leg): void {
     conn.on('open', () => { try { conn.send({ t: 'wlk1-hello', e2ee: !!this.e2ee }); } catch { /* noop */ } });
     conn.on('data', (d: unknown) => {
-      const m = (d ?? null) as { t?: unknown; e2ee?: unknown } | null;
-      if (!m || (m.t !== 'wlk1-hello' && m.t !== 'wlk1-ack')) return;
+      const m = (d ?? null) as { t?: unknown; e2ee?: unknown; speaking?: unknown } | null;
+      if (!m || typeof m.t !== 'string') return;
+      /* presence heartbeat — remote PTT state, independent of crypto */
+      if (m.t === 'wlk1-speaking') {
+        if (this.legs.get(conn.peer) === leg) setPeer(leg.slot, { speaking: !!m.speaking });
+        return;
+      }
+      if (m.t !== 'wlk1-hello' && m.t !== 'wlk1-ack') return;
       if (m.t === 'wlk1-hello') { try { conn.send({ t: 'wlk1-ack', e2ee: !!this.e2ee }); } catch { /* noop */ } }
       this._settleCrypto(leg, !!m.e2ee, m.e2ee ? '' : 'peer lacks transforms');
     });
     conn.on('close', () => { if (this._dataConns.get(conn.peer) === conn) this._dataConns.delete(conn.peer); });
     conn.on('error', () => { /* media leg has its own error path */ });
+  }
+
+  /** Broadcast local PTT state so peers light our chip/RX LED. Best-effort. */
+  sendSpeaking(on: boolean): void {
+    for (const [, conn] of this._dataConns) {
+      try {
+        const dc = conn as unknown as { open?: boolean; send?: (m: unknown) => void };
+        if (dc && dc.open && typeof dc.send === 'function') conn.send({ t: 'wlk1-speaking', speaking: on });
+      } catch { /* noop */ }
+    }
   }
 
   /* inbound DataChannel from a peer that initiated negotiation */

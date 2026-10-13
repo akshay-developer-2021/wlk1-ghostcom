@@ -722,7 +722,33 @@ on('peers', (v: unknown) => {
   }
   const countEl = $('lnkCount');
   if (countEl) countEl.textContent = String(linkedCount());
+  syncChipsSpeaking(peers);
+  updateGlow(peers);
 });
+
+/* chip speaking class + shell light-spill, driven by declared presence so
+   they stay truthful even while the VAD loop sleeps (single writer here;
+   the loop only adds energy while awake). */
+function syncChipsSpeaking(peers: Map<number, PeerInfo>): void {
+  const box = $('peers');
+  if (!box) return;
+  for (const child of box.children) {
+    const el = child as HTMLElement;
+    const slot = +(el.dataset['slot'] ?? -1);
+    el.classList.toggle('speaking', peers.get(slot)?.speaking === true);
+  }
+}
+
+function updateGlow(peers?: Map<number, PeerInfo>): void {
+  const shell = $('shell');
+  if (!(shell instanceof HTMLElement)) return;
+  const map = peers ?? state.peers;
+  const rx = !state.tx && [...map.values()].some((p) => p.linked && p.speaking);
+  shell.classList.toggle('tx-glow', state.tx === true);
+  shell.classList.toggle('rx-glow', rx);
+}
+
+on('tx', () => updateGlow());
 
 function renderChips(peers: Map<number, PeerInfo>): void {
   const box = $('peers');

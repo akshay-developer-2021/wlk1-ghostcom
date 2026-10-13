@@ -45,15 +45,19 @@ export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
   let txData: Uint8Array<ArrayBuffer> | null = null;
   const remotes = new Map<number, RemoteTap>();   // slot -> {an, data}
   const chipCache = new Map<number, Element | null>(); // slot -> element
+  const declaredSpeaking = new Map<number, boolean>(); // slot -> peer-reported PTT
   let rafOn = false, lastFrame = 0, lastActivity = 0;
   let idleTimer: ReturnType<typeof setInterval> | null = null;
 
   on('peers', (v: unknown) => {
     if (!(v instanceof Map)) return;
+    const peers = v as Map<number, PeerInfo>;
     /* cache chip elements; rebuild only when membership changes */
     chipCache.clear();
-    for (const slot of (v as Map<number, PeerInfo>).keys()) {
+    declaredSpeaking.clear();
+    for (const [slot, p] of peers) {
       chipCache.set(slot, document.querySelector(`.chip[data-slot="${slot}"]`));
+      declaredSpeaking.set(slot, p.speaking === true);
     }
   });
 
@@ -141,7 +145,7 @@ export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
       }
 
       for (const [slot, o] of remotes) {
-        const talk = hasEnergy(o.an, o.data);
+        const talk = hasEnergy(o.an, o.data) || declaredSpeaking.get(slot) === true;
         const chip = chipCache.get(slot) ?? document.querySelector(`.chip[data-slot="${slot}"]`);
         if (chip) chip.classList.toggle('speaking', talk);
         if (talk) anySpeech = true;

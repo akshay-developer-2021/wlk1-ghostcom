@@ -114,6 +114,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
     log(`SQUELCH OPEN — CH ${state.channel}`, 'tx');
     countPkt();
     power.holdWake();
+    try { mesh.sendSpeaking(true); } catch { /* presence is best-effort */ }
   }
 
   function release(): void {
@@ -132,6 +133,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
       setLed('txLed', '');
       log(`SQUELCH CLOSED — ${dur}s`, 'tx');
       countPkt();
+      try { mesh.sendSpeaking(false); } catch { /* presence is best-effort */ }
       sfx.pttClose();
       sfx.roger();
       power.dropWake();
