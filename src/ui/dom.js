@@ -51,7 +51,7 @@ export function log(msg, kind = 'sys') {
   d.className = 'dir'; d.textContent = dir;
   const body = document.createElement('span');
   body.className = 'body'; body.textContent = msg;   // untrusted-safe
-  row.append(time, ' ', d, body);
+  row.append(time, ' ', d, ' ', body);
   b.appendChild(row);
   b.scrollTop = b.scrollHeight;
   while (b.children.length > 40) b.removeChild(b.firstChild);
