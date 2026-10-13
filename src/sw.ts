@@ -35,7 +35,7 @@ declare const self: SwGlobalScope;
 const CACHE_VERSION = 'v2';
 const CACHE = `wlk1-${CACHE_VERSION}`;
 const RUNTIME_CAP = 60;
-const ASSETS: string[] = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg'];
+const ASSETS: string[] = ['/'];
 
 // Best-effort: keep the newest entries, drop the oldest beyond the cap.
 function trimRuntime(cache: Cache): Promise<void> {

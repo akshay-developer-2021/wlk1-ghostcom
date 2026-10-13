@@ -20,12 +20,13 @@ vi.mock('peerjs', () => ({
   },
 }));
 vi.mock('../src/audio/silentTrack.js', () => ({
-  silentStream: () => 'STREAM_SENTINEL',
-  getSilentTrack: () => 'TRACK_SENTINEL',
-  silentContextRunning: () => true,
+  silentStream: vi.fn(() => 'STREAM_SENTINEL'),
+  getSilentTrack: vi.fn(() => 'TRACK_SENTINEL'),
+  silentContextRunning: vi.fn(() => true),
 }));
 
 import { Mesh, onCrypto } from '../src/webrtc/mesh.js';
+import { silentStream } from '../src/audio/silentTrack.js';
 import { set, state, clearPeers } from '../src/core/state.js';
 
 function makeMesh(e2ee = null) {
@@ -448,6 +449,137 @@ describe('SAS — per-peer prints pruned on leg close', () => {
       mesh.leave();
     } finally {
       set({ secret: null, sas: null });
+    }
+  });
+});
+
+describe('ghost-redial circuit breaker', () => {
+  it('3 consecutive never-connected fires park the slot; PARKED logs once, dials skip, force bypasses', async () => {
+    vi.useFakeTimers();
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    try {
+      const { mesh, logs } = makeMesh();
+      mesh.channel = '22';
+      mesh.slot = 2;
+      mesh.peer = { destroyed: false, call: vi.fn((id) => fakeCall(id, fakeSender())) };
+      set({ tx: true });   // park the auto-redial so each fire is driven explicitly
+      try {
+        for (let k = 0; k < 3; k++) {
+          const call = fakeCall('peer-1', fakeSender());
+          mesh._registerLeg(call, 1, 'listen');
+          clearTimeout(mesh.legs.get('peer-1')._cryptoTimer);   // silence handshake noise
+          await vi.advanceTimersByTimeAsync(10_000);            // never-connected fires
+        }
+      } finally {
+        set({ tx: false });
+      }
+      expect(mesh._dialFails.get(1)).toBe(3);
+      expect(logs.filter(([, m]) => m.includes('NEVER-CONNECTED')).length).toBe(3);
+      expect(logs.filter(([, m]) => m.includes('UNIT-1 PARKED')).length).toBe(1); // transition only
+
+      mesh.peer.call.mockClear();
+      mesh._dialListen(1);                                       // parked — skipped silently
+      await vi.advanceTimersByTimeAsync(10);
+      expect(mesh.peer.call).not.toHaveBeenCalled();
+      expect(logs.filter(([, m]) => m.includes('UNIT-1 PARKED')).length).toBe(1); // no re-log
+
+      /* fake timers never flush the WebCrypto dial chain — finish on real timers */
+      vi.useRealTimers();
+      silentStream.mockReturnValue({ getAudioTracks: () => [{ kind: 'audio' }] });
+      try {
+        mesh._dialListen(1, true);                              // slow-lane force bypasses
+        await new Promise((r) => setTimeout(r, 100));
+      } finally {
+        silentStream.mockReturnValue('STREAM_SENTINEL');
+      }
+      expect(mesh.peer.call).toHaveBeenCalledTimes(1);
+      mesh.leave();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ICE failed teardowns count toward parking; PARKED logs once', () => {
+    const { mesh, logs } = makeMesh();
+    const seat = () => {
+      const c = fakeCall('peer-7', fakeSender());
+      mesh._registerLeg(c, 7, 'listen');
+      const leg = mesh.legs.get('peer-7');
+      clearTimeout(leg._cryptoTimer);
+      clearTimeout(leg._neverTimer);
+      leg._neverTimer = undefined;
+      return c;
+    };
+    for (let k = 0; k < 3; k++) {
+      const c = seat();
+      c.peerConnection.connectionState = 'failed';
+      c.firePc('connectionstatechange');
+    }
+    expect(mesh._dialFails.get(7)).toBe(3);
+    expect(logs.filter(([, m]) => m.includes('UNIT-7 PARKED')).length).toBe(1);
+    mesh.leave();
+  });
+
+  it('watchdog force-redials parked slots every 4th tick', async () => {
+    vi.useFakeTimers();
+    set({ secret: 'ABC234DEFGHJKLMN', connected: true });
+    try {
+      const { mesh } = makeMesh();
+      mesh.channel = '22';
+      mesh.slot = 3;
+      mesh.peer = { destroyed: false };
+      mesh.knownOccupied.add(1);
+      const keep = fakeCall('peer-0', fakeSender());   // live leg → knownOccupied path
+      mesh._registerLeg(keep, 0, 'listen');
+      const keepLeg = mesh.legs.get('peer-0');
+      clearTimeout(keepLeg._cryptoTimer);
+      clearTimeout(keepLeg._neverTimer);
+      keepLeg._neverTimer = undefined;
+      mesh._dialFails.set(1, 3);                       // parked dead slot
+      const seen = [];
+      const spy = vi.spyOn(mesh, '_dialListen').mockImplementation((s, f) => { seen.push([s, !!f]); });
+      try {
+        mesh._startWatchdog();
+        for (let t = 0; t < 4; t++) await vi.advanceTimersByTimeAsync(mesh.cfg.watchdogMs);
+        expect(seen.filter(([s]) => s === 1).map(([, f]) => f)).toEqual([false, false, false, true]);
+      } finally {
+        spy.mockRestore();
+      }
+      mesh.leave();
+    } finally {
+      set({ connected: false });
+      vi.useRealTimers();
+    }
+  });
+
+  it('remote stream unparks the slot', async () => {
+    vi.useFakeTimers();
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    try {
+      const { mesh } = makeMesh();
+      mesh.channel = '22';
+      mesh.slot = 2;
+      mesh.peer = { destroyed: false, call: vi.fn((id) => fakeCall(id, fakeSender())) };
+      mesh._dialFails.set(1, 3);                       // parked
+      mesh._dialListen(1);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(mesh.peer.call).not.toHaveBeenCalled();   // still parked
+
+      mesh._onRemoteStream(1, { id: 'remote' });
+      expect(mesh._dialFails.get(1)).toBeUndefined();  // proof of life resets
+      /* fake timers never flush the WebCrypto dial chain — finish on real timers */
+      vi.useRealTimers();
+      silentStream.mockReturnValue({ getAudioTracks: () => [{ kind: 'audio' }] });
+      try {
+        mesh._dialListen(1);
+        await new Promise((r) => setTimeout(r, 100));
+      } finally {
+        silentStream.mockReturnValue('STREAM_SENTINEL');
+      }
+      expect(mesh.peer.call).toHaveBeenCalledTimes(1);
+      mesh.leave();
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

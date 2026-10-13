@@ -35,27 +35,27 @@ export interface PttDeps {
   isRadioActive?: () => boolean;
 }
 
-/** Concurrent TX owners. 'api' is the default for programmatic callers —
-    including the laptop T-key path in main.ts, which calls press() /
-    release() with no holder argument. 'enter' is the focused-button
-    Enter-hold path, kept separate from 'api' so the two never share
-    a refcount. */
+/** Concurrent TX owners — one refcount entry per input path. 'pointer'
+    is the PTT button, 'space' the global Space shortcut (+ focused-button
+    Space), 't' the laptop T-key path in main.ts (press('t')/release('t')),
+    'enter' the focused-button Enter-hold, 'api' the default for
+    programmatic press()/release() callers with no holder argument. */
 export type PttHolder = 'pointer' | 'space' | 't' | 'api' | 'enter';
 
 export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, isRadioActive }: PttDeps) {
   const btn = req('ptt');
   let pressed = false;
-  const holders = new Set<string>();
+  const holders = new Set<PttHolder>();
   let token = 0;
   let txStart = 0;
   let cutoffTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Map a press/release argument to its holder: an explicit string wins,
       a passed event means the pointer button, omitted means 'api'. */
-  const holderOf = (h?: string | Event): string =>
+  const holderOf = (h?: PttHolder | Event): PttHolder =>
     typeof h === 'string' ? h : (h ? 'pointer' : 'api');
 
-  async function press(holderOrEvent?: string | PointerEvent, e?: PointerEvent): Promise<void> {
+  async function press(holderOrEvent?: PttHolder | PointerEvent, e?: PointerEvent): Promise<void> {
     const holder = holderOf(holderOrEvent);
     const ev = typeof holderOrEvent === 'string' ? e : holderOrEvent;
     holders.add(holder);
@@ -188,7 +188,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, 
     }
   }
 
-  function release(holderOrEvent?: string | Event): void {
+  function release(holderOrEvent?: PttHolder | Event): void {
     holders.delete(holderOf(holderOrEvent));
     if (holders.size > 0) return;          // another holder still owns TX — keep the air
     if (!pressed) return;

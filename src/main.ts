@@ -30,7 +30,7 @@ import { MicManager } from './audio/mic.js';
 import { Sfx, HAPTIC } from './audio/sfx.js';
 import { Mesh, onQuality, onCrypto } from './webrtc/mesh.js';
 import { resumeSilentContext } from './audio/silentTrack.js';
-import { $, log, toast, setSync, countPkt } from './ui/dom.js';
+import { $, log, toast, setSync } from './ui/dom.js';
 import { safeGet, safeSet, safeRemove, safeSessGet, safeSessSet, safeSessRemove } from './ui/dom.js';
 import { createPTT } from './ui/ptt.js';
 import { createLoop } from './ui/loop.js';
@@ -205,8 +205,19 @@ async function joinRoom(channel: string, secret: string, persist: boolean): Prom
   digitBuf = channel.split('');
   updateDisplay();
   const r = (await mesh.join(channel)) as JoinResult | undefined;
-  if (r?.ok) { mesh.startQualityPolling(); countPkt(); return true; }
-  if (r?.reason === 'full') toast('CHANNEL FULL — ALL SLOTS TAKEN');
+  // Serialized dials (and hash-nav joins) can still inherit a stale room:
+  // mesh.join hands concurrent callers the in-flight promise. Verify the
+  // live room is ours, else one corrective re-join, else fail loudly.
+  let j = r;
+  if (j?.ok && (mesh.channel !== channel || state.channel !== channel)) {
+    j = (await mesh.join(channel)) as JoinResult | undefined;
+  }
+  if (j?.ok && mesh.channel === channel && state.channel === channel) {
+    mesh.startQualityPolling();
+    return true;
+  }
+  if (j?.ok) joinError('CHANNEL MISMATCH — RETRY');
+  else if (j?.reason === 'full') toast('CHANNEL FULL — ALL SLOTS TAKEN');
   return false;
 }
 
@@ -626,7 +637,26 @@ async function enterDigit(n: number): Promise<void> {
   if (digitBuf.length === 2) await dial(digitBuf.join(''));
 }
 
+/* Rapid keypad dials must not overlap: mesh.join hands concurrent callers
+   the in-flight promise, so an unserialized second dial would inherit the
+   first dial's room and report it as its own. Chain dials one at a time. */
+let dialMutex: Promise<void> | null = null;
+
 async function dial(channel: string): Promise<void> {
+  const prev = dialMutex ?? Promise.resolve();
+  let done!: () => void;
+  const mine = new Promise<void>((r) => { done = r; });
+  dialMutex = mine;
+  await prev;
+  try {
+    await dialNow(channel);
+  } finally {
+    done();
+    if (dialMutex === mine) dialMutex = null;
+  }
+}
+
+async function dialNow(channel: string): Promise<void> {
   if (meshRt.peer && state.channel === channel) return;
   const norm = normalizeRoomSecret(typeof state.secret === 'string' ? state.secret : '');
   if (!isValidRoomSecret(norm)) {

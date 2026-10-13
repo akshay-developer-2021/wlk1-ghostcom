@@ -51,12 +51,14 @@ export class Mesh {
   knownOccupied: Set<number> = new Set();   // slots confirmed occupied (ever linked)
   private _pendingRedial = new Set<number>();
   private _missStrikes = new Map<number, number>(); // slot -> consecutive peer-unavailable strikes
+  private _dialFails = new Map<number, number>(); // slot -> consecutive transport failures (never-connected / ICE / dead dial)
   private _joinMutex: Promise<JoinResult | undefined> | null = null;
   private _rejoinInFlight: Promise<void> | null = null;
   private _reconnectChain = false; // single-flight broker reconnect loop
   private _destroyed = false;
   private _sasPrints = new Map<string, Set<string>>();
   private _watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private _watchdogTick = 0;
   private _statsTimer: ReturnType<typeof setInterval> | null = null;
   private _txGen = 0;
   private _dataConns = new Map<string, DataConnection>();      // peerId -> crypto-negotiation DataConnection
@@ -212,6 +214,8 @@ export class Mesh {
     this._dataConns.clear();
     this._pendingRedial.clear();
     this._missStrikes.clear();
+    this._dialFails.clear();
+    this._watchdogTick = 0;
     clearPeers();
     if (this.peer) { try { this.peer.destroy(); } catch { /* noop */ } this.peer = null; }
     this.slot = -1;
@@ -282,7 +286,7 @@ export class Mesh {
       retry();                                    // reconnect immediately, no dead 1.2s
     });
 
-    p.on('open', () => { this._reconnectChain = false; set({ connected: true }); });
+    p.on('open', () => { this._reconnectChain = false; this._dialFails.clear(); set({ connected: true }); });
   }
 
   async _rejoin(): Promise<void> {
@@ -298,8 +302,19 @@ export class Mesh {
   }
 
   /* ── LEGS ──────────────────────────────────────────────── */
-  _dialListen(slot: number): void {
+  /* Ghost-redial breaker: a dead slot (stale registration, black-holed
+     peer) never yields peer-unavailable, so transport failures park it
+     after 3 consecutive strikes. force=true is the watchdog slow lane. */
+  private _bumpDialFail(slot: number): number {
+    const n = (this._dialFails.get(slot) ?? 0) + 1;
+    this._dialFails.set(slot, n);
+    if (n === 3) this.log(`UNIT-${slot} PARKED`, 'warn');
+    return n;
+  }
+
+  _dialListen(slot: number, force = false): void {
     if (!this.peer || this.slot < 0) return;
+    if (!force && (this._dialFails.get(slot) ?? 0) >= 3) return; // parked — slow lane only
     const secret = state.secret;
     const channel = this.channel;
     if (!secret || !channel) return;
@@ -329,9 +344,10 @@ export class Mesh {
         call = peer.call(id, stream); // guaranteed audio m-line
       } catch (err) {
         this.log(`DIAL UNIT-${slot} FAILED — ${(err as Error)?.message ?? err}`, 'warn');
+        this._bumpDialFail(slot); // redial attempt yielded no stream
         return;
       }
-      if (!call) { this.log(`DIAL UNIT-${slot} FAILED — NO CALL`, 'warn'); return; }
+      if (!call) { this.log(`DIAL UNIT-${slot} FAILED — NO CALL`, 'warn'); this._bumpDialFail(slot); return; }
       this._registerLeg(call, slot, 'listen');
       this.log(`LISTEN LEG → UNIT-${slot}`, 'rx');
     }).catch(() => {});
@@ -341,6 +357,7 @@ export class Mesh {
      sender (pre-gesture Safari). Safe to call on every unlock. */
   retryPendingDials(): void {
     if (this._destroyed) return;
+    this._dialFails.clear(); // explicit user/tap recovery — unpark everything
     if (!this.peer || this.slot < 0 || state.tx) return;
     for (let j = 0; j < this.slot; j++) {
       const has = [...this.legs.values()].some((l) => l.slot === j);
@@ -472,6 +489,7 @@ export class Mesh {
         const cur = this.legs.get(id);
         if (!cur || cur !== leg) return;
         this.log(`ICE NEVER-CONNECTED — REDIAL UNIT-${leg.slot}`, 'warn');
+        this._bumpDialFail(leg.slot);
         try { call.close(); } catch { /* noop */ }
         try { clearTimeout(call.__wlkDiscTimer); } catch { /* noop */ }
         this.legs.delete(id);
@@ -684,6 +702,7 @@ export class Mesh {
   _onRemoteStream(slot: number, stream: MediaStream): void {
     setPeer(slot, { stream });
     this._missStrikes.delete(slot);   // media is proof of life — reset ghost strikes
+    this._dialFails.delete(slot);     // media is proof of life — unpark the slot
     this.log(`RX STREAM — UNIT-${slot}`, 'rx');
   }
 
@@ -696,6 +715,7 @@ export class Mesh {
     const teardownRedial = (why: string): void => {
       const leg = legOf();
       if (!leg) return;                        // stale event — not our leg anymore
+      this._bumpDialFail(slot); // transport failure — one strike toward parking
       clearTimeout(leg._cryptoTimer);
       clearTimeout(leg._neverTimer);
       try { clearTimeout(call.__wlkDiscTimer); } catch { /* noop */ }
@@ -739,6 +759,7 @@ export class Mesh {
                   this.log(`ICE STUCK (${cur}) — REDIAL UNIT-${slot} DEFERRED UNTIL TX END`, 'warn');
                 } else {
                   this.log(`ICE STUCK (${cur}) — REDIAL UNIT-${slot}`, 'warn');
+                  this._bumpDialFail(slot); // torn-down stuck leg counts toward parking
                   try { call.close(); } catch { /* noop */ }
                   if (this.legs.get(call.peer)?.call === call) this.legs.delete(call.peer);
                   this._closeDataConnFor(call.peer);
@@ -754,6 +775,7 @@ export class Mesh {
           teardownRedial('ICE FAILED');
         } else if (st === 'connected' || (st as string) === 'completed') {
           clearTimeout(call.__wlkDiscTimer);
+          this._dialFails.delete(slot); // connected is proof of life — unpark
           const leg = legOf();
           if (leg) { clearTimeout(leg._neverTimer); leg._neverTimer = undefined; }
         }
@@ -766,6 +788,7 @@ export class Mesh {
         const ist = (pc as RTCPeerConnection & { iceConnectionState?: string }).iceConnectionState;
         if (ist === 'connected' || (ist as string) === 'completed') {
           clearTimeout(call.__wlkDiscTimer);
+          this._dialFails.delete(slot); // connected is proof of life — unpark
           const leg = legOf();
           if (leg) { clearTimeout(leg._neverTimer); leg._neverTimer = undefined; }
         } else if (ist === 'failed' || (ist as string) === 'closed') {
@@ -839,6 +862,7 @@ export class Mesh {
          live mic stream. */
       for (let j = 0; j < this.slot; j++) {
         if (this._destroyed) break;
+        if ((this._dialFails.get(j) ?? 0) >= 3) continue; // parked — TX doesn't unpark
         try {
           const id = await slotPeerId(secret, channel, j);
           if (this._destroyed) break;
@@ -921,6 +945,7 @@ export class Mesh {
   /* ── WATCHDOG (symmetric, TX-safe) ─────────────────────── */
   _startWatchdog(): void {
     if (this._watchdogTimer != null) clearInterval(this._watchdogTimer);
+    this._watchdogTick = 0;
     this._watchdogTimer = setInterval(() => {
       if (this._destroyed) return;
       if (typeof document !== 'undefined' && document.hidden) return;
@@ -930,6 +955,9 @@ export class Mesh {
          broker. The reconnect chain / rejoin owns recovery until 'open'. */
       if (!state.connected) return;
       if (!this.peer || this.peer.destroyed || this.slot < 0) return;
+      /* Slow lane: every 4th sweep retries PARKED slots too, so a
+         revived peer rejoins within ~1min without hot-looping. */
+      const force = (++this._watchdogTick % 4 === 0);
       if (this.legs.size === 0) {
         /* zero-leg probe: knownOccupied is empty after a fresh join or a
            rejoin partition, and slot-0 never dials anyone — sweep every
@@ -940,7 +968,7 @@ export class Mesh {
           const linked = [...this.legs.values()].some((l) => l.slot === j);
           if (!linked) {
             this.log(`WATCHDOG — REDIAL UNIT-${j}`, 'sys');
-            this._dialListen(j);
+            this._dialListen(j, force);
           }
         }
         return;
@@ -950,7 +978,7 @@ export class Mesh {
         const linked = [...this.legs.values()].some((l) => l.slot === slot);
         if (!linked) {
           this.log(`WATCHDOG — REDIAL UNIT-${slot}`, 'sys');
-          this._dialListen(slot);
+          this._dialListen(slot, force);
         }
       }
     }, this.cfg.watchdogMs);

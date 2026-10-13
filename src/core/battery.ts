@@ -31,7 +31,6 @@ export class PowerManager {
   private doc: Document;
   private nav: NavigatorLike;
   private _log: LogFn;
-  private _intervalTimers: Set<ReturnType<typeof setInterval>>;   // timers that must respect hidden state
   private _wakeLock: WakeLockSentinelLike | null;
   private _battCb = new Set<(level: number, charging: boolean) => void>();
 
@@ -39,7 +38,6 @@ export class PowerManager {
     this.doc = documentRef;
     this.nav = navigatorRef;
     this._log = log;
-    this._intervalTimers = new Set();   // timers that must respect hidden state
     this._wakeLock = null;
   }
 
@@ -79,13 +77,6 @@ export class PowerManager {
     set({ screenOn: !this.doc.hidden });
   }
 
-  /** setInterval replacement: callback skipped while hidden (never cleared). */
-  intervalWhenVisible(fn: () => void, ms: number): ReturnType<typeof setInterval> {
-    const t = setInterval(() => { if (!this.doc.hidden) fn(); }, ms);
-    this._intervalTimers.add(t);
-    return t;
-  }
-
   /** Wake lock held ONLY while transmitting. */
   async holdWake(): Promise<WakeLockSentinelLike | null> {
     try {
@@ -103,15 +94,5 @@ type VisibilityListener = (visible: boolean) => void;
 const visibilityListeners = new Set<VisibilityListener>();
 export function onVisibilityChange(fn: VisibilityListener): void { visibilityListeners.add(fn); }
 function emitVisibility(doc: Document): void { for (const fn of visibilityListeners) fn(!doc.hidden); }
-
-/* ---- VAD-gated render pacing helper ------------------------------
-   Callers ask for a frame budget instead of running rAF blindly. */
-export function frameBudgetMs(powerSave: boolean, active: boolean): number {
-  if (!active) return Infinity;        // loop should sleep entirely
-  return powerSave ? 200 : 66;         // 5fps / 15fps
-}
-
-/* Shared idle-state helper used by mesh (leg teardown) and ui loop. */
-export function isHidden(): boolean { return typeof document !== 'undefined' && document.hidden; }
 
 export { on, state };

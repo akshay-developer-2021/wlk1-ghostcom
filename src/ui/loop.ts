@@ -28,7 +28,6 @@ export interface RenderLoop {
   clearTx: () => void;
   registerRemote: (slot: number, analyser: AnalyserNode, src?: AudioNode | null) => void;
   unregisterRemote: (slot: number) => void;
-  reset: () => void;
   kick: () => void;
 }
 
@@ -97,13 +96,6 @@ export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
     kick();
   }
   function unregisterRemote(slot: number): void { dropTap(remotes.get(slot)); remotes.delete(slot); }
-  function reset(): void {
-    clearTx();
-    for (const tap of remotes.values()) dropTap(tap);
-    remotes.clear();
-    sleep();
-    setLed('rxLed', '');
-  }
 
   function kick(): void {
     lastActivity = performance.now();
@@ -188,5 +180,5 @@ export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
     else if (txAnalyser || remotes.size) kick();
   });
 
-  return { registerTx, clearTx, registerRemote, unregisterRemote, reset, kick };
+  return { registerTx, clearTx, registerRemote, unregisterRemote, kick };
 }

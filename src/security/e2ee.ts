@@ -113,7 +113,7 @@ export class E2EE {
       || typeof (RTCRtpSender.prototype as unknown as EncodedStreamsSource).createEncodedStreams === 'function';
   }
 
-  /** @param rawKeyBytes Uint8Array(32) — from crypto.deriveGroupKeyRaw() */
+  /** @param rawKeyBytes Uint8Array(32) — from deriveRawGroupKey() */
   constructor(rawKeyBytes: Uint8Array, log: (msg: string, kind?: string) => void = () => {}) {
     if (!E2EE.supported()) throw new Error('E2EE unsupported');
     this._log = log;

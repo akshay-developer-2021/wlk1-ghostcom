@@ -38,7 +38,7 @@ export interface AppState {
   powerSave: boolean;
   screenOn: boolean;
   e2eeMode: E2eeMode | string;
-  sas: string | null;          // 4-char verification code
+  sas: string | null;          // 6-char verification code
   peers: Map<number, PeerInfo>; // slot -> {linked, speaking, quality}
   [k: string]: unknown;
 }
@@ -54,7 +54,7 @@ export const state: AppState = {
   powerSave: false,
   screenOn: true,
   e2eeMode: 'off',           // 'e2ee' | 'dtls-only' | 'off'
-  sas: null,                 // 4-char verification code
+  sas: null,                 // 6-char verification code
   peers: new Map(),          // slot -> {linked, speaking, quality}
 };
 
