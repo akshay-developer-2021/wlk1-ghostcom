@@ -51,6 +51,10 @@ export class Mesh {
   knownOccupied: Set<number> = new Set();   // slots confirmed occupied (ever linked)
   private _pendingRedial = new Set<number>();
   private _missStrikes = new Map<number, number>(); // slot -> consecutive peer-unavailable strikes
+  /* Slots ever linked this channel. Unlike knownOccupied (evicted after
+     misses), this is memory: it tells the zero-leg sweep whether anyone
+     could possibly be out there. Fresh solo joins stay silent. */
+  private _seenPeers = new Set<number>();
   private _dialFails = new Map<number, number>(); // slot -> consecutive transport failures (never-connected / ICE / dead dial)
   private _joinMutex: Promise<JoinResult | undefined> | null = null;
   private _rejoinInFlight: Promise<void> | null = null;
@@ -82,7 +86,11 @@ export class Mesh {
   }
 
   async _join(channel: string): Promise<JoinResult> {
+    const prevChannel = this.channel;
     this.leave();
+    /* Channel changed → new room, forget old faces. Same-channel rejoin
+       keeps them: the rejoiner is exactly who the sweep must rediscover. */
+    if (prevChannel !== channel) this._seenPeers.clear();
     set({ joined: false, connected: false });
     this.channel = channel;
     this.log(`SCANNING CH ${channel}…`, 'sys');
@@ -224,7 +232,7 @@ export class Mesh {
     set({ mySlot: -1, joined: false, connected: false, sas: null });
   }
 
-  destroy(): void { this._destroyed = true; this.leave(true); }
+  destroy(): void { this._destroyed = true; this._seenPeers.clear(); this.leave(true); }
 
   /* ── SIGNALING WIRING ──────────────────────────────────── */
   _wirePeer(p: Peer): void {
@@ -428,6 +436,7 @@ export class Mesh {
     const leg: Leg = { call, slot, mode, crypto: null };   // null=pending handshake
     this.legs.set(id, leg);
     this.knownOccupied.add(slot);
+    this._seenPeers.add(slot);
     setPeer(slot, { linked: true });
     call.on('stream', (remote: MediaStream) => {
       if (this.legs.get(id)?.call !== call) return;   // stale event from a replaced leg
@@ -959,10 +968,11 @@ export class Mesh {
          revived peer rejoins within ~1min without hot-looping. */
       const force = (++this._watchdogTick % 4 === 0);
       if (this.legs.size === 0) {
-        /* zero-leg probe: knownOccupied is empty after a fresh join or a
-           rejoin partition, and slot-0 never dials anyone — sweep every
-           slot except our own so isolates and rejoiners rediscover the
-           mesh instead of deadlocking alone. */
+        /* zero-leg probe: sweep only if we've SEEN peers on this channel
+           (rejoin partition, pre-gesture skips). A fresh solo join has an
+           empty seen-set — stay silent instead of dialing 7 empty slots
+           every 15s. Claim-time dials + unlock/TX redials cover discovery. */
+        if (this._seenPeers.size === 0) return;
         for (let j = 0; j < this.cfg.maxSlots; j++) {
           if (j === this.slot) continue;
           const linked = [...this.legs.values()].some((l) => l.slot === j);
