@@ -21,9 +21,9 @@ export function bootSequence(lines) {
   }, 26);
 }
 
-/* matrix rain — boot flourish only, then killed; skipped for
+/* matrix rain — continuous boot flourish; skipped for
    reduced-motion and hidden tabs (wasted GPU otherwise) */
-export function matrixRain(durationMs = 2500) {
+export function matrixRain() {
   if (REDUCED || document.hidden) { const c = $('matrix'); c?.remove(); return; }
   const c = $('matrix');
   if (!c) return;
@@ -32,9 +32,7 @@ export function matrixRain(durationMs = 2500) {
   const cols = Math.floor(c.width / 14);
   const drops = Array(cols).fill(0);
   const glyphs = 'ｱｲｳｴｵｶｷｸｹｺ01▚▞λΣΩ$#@';
-  let stop = false;
   (function rain() {
-    if (stop) return;
     x.fillStyle = 'rgba(5,7,5,0.12)'; x.fillRect(0, 0, c.width, c.height);
     x.fillStyle = '#1e5a2a'; x.font = '12px monospace';
     drops.forEach((y, i) => {
@@ -43,7 +41,6 @@ export function matrixRain(durationMs = 2500) {
     });
     requestAnimationFrame(rain);
   })();
-  setTimeout(() => { stop = true; c.remove(); }, durationMs);
 }
 
 export function showHintOnce(seenKey = 'wlk1-seen') {

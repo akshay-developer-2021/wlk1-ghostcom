@@ -149,7 +149,7 @@ async function micTest() {
   }
 }
 
-/* SHARE — the growth loop, now carrying the secret credential */
+/* SHARE — copy link to clipboard (no prompt); falls back gracefully */
 function shareChannel() {
   const secret = state.secret || generateRoomSecret();
   set({ secret });
@@ -160,9 +160,11 @@ function shareChannel() {
     log(`URL EXPORTED — CH ${state.channel} (+KEY)`, 'sys');
     sfx.lock();
   };
-  if (navigator.share) navigator.share({ url }).then(done).catch(() => {});
-  else if (navigator.clipboard?.writeText) navigator.clipboard.writeText(url).then(done).catch(() => fallbackCopy(url, done));
-  else fallbackCopy(url, done);
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(url).then(done).catch(() => fallbackCopy(url, done));
+  } else {
+    fallbackCopy(url, done);
+  }
 }
 function fallbackCopy(url, done) {
   const ta = document.createElement('textarea');
@@ -170,6 +172,32 @@ function fallbackCopy(url, done) {
   try { document.execCommand('copy'); done(); } catch { toast('COPY FAILED'); }
   ta.remove();
 }
+
+/* copy all logs from the hack log area to clipboard */
+function copyAllLogs() {
+  const b = $('hackLines');
+  if (!b) return;
+  const text = Array.from(b.children).map((row) => {
+    const time = row.querySelector('.t')?.textContent.trim() || '';
+    const dir = row.querySelector('.dir')?.textContent.trim() || '';
+    const body = row.querySelector('.body')?.textContent.trim() || '';
+    return `${time} ${dir} ${body}`.trim();
+  }).join('\n');
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('LOGS COPIED')).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch { toast('COPY FAILED'); }
+      ta.remove();
+    });
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch { toast('COPY FAILED'); }
+    ta.remove();
+  }
+}
+$('copyLogsBtn')?.addEventListener('click', copyAllLogs);
 
 /* ── remote audio + analysers ─────────────────────────────── */
 const audioEls = new Map();
