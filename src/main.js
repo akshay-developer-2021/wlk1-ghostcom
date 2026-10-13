@@ -60,6 +60,8 @@ async function initSession() {
   const savedSecret = localStorage.getItem('wlk1-key');
   const channel = saved || '22';
   set({ channel, secret: isValidRoomSecret(savedSecret || '') ? savedSecret : generateRoomSecret() });
+  localStorage.setItem('wlk1-ch', channel);
+  localStorage.setItem('wlk1-key', state.secret);
   digitBuf = channel.split('');
   updateDisplay();
   await rekeyE2EE();                         // no race: keys first, then legs
