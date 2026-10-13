@@ -24,7 +24,7 @@ import type { Sfx } from '../audio/sfx.js';
 import type { E2EE } from '../security/e2ee.js';
 import type { LogKind } from '../ui/dom.js';
 
-export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mode: 'live'|'listen'; crypto: boolean|null; recvonly?: boolean; _cryptoTimer?: any; _misses?: number }
+export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mode: 'live'|'listen'; crypto: boolean|null; recvonly?: boolean; _cryptoTimer?: any; _misses?: number; _neverTimer?: any; _sasDone?: boolean }
 
 export interface TxReport { attached: number; redialed: number }
 
@@ -52,6 +52,7 @@ export class Mesh {
   private _pendingRedial = new Set<number>();
   private _missStrikes = new Map<number, number>(); // slot -> consecutive peer-unavailable strikes
   private _joinMutex: Promise<JoinResult | undefined> | null = null;
+  private _rejoinInFlight: Promise<void> | null = null;
   private _destroyed = false;
   private _sasPrints = new Set<string>();
   private _watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -103,7 +104,13 @@ export class Mesh {
             config: { iceServers: this.cfg.iceServers },
             debug: 0 as LogLevel,
             ...(this.cfg.signaling.host
-              ? { host: this.cfg.signaling.host, secure: this.cfg.signaling.secure }
+              ? {
+                  host: this.cfg.signaling.host,
+                  secure: this.cfg.signaling.secure,
+                  ...(this.cfg.signaling.port !== undefined ? { port: this.cfg.signaling.port } : {}),
+                  ...(this.cfg.signaling.path !== undefined ? { path: this.cfg.signaling.path } : {}),
+                  ...(this.cfg.signaling.key !== undefined ? { key: this.cfg.signaling.key } : {}),
+                }
               : {}),
           });
         } catch { return { slot: i, result: 'error' }; }
@@ -153,7 +160,7 @@ export class Mesh {
     if (!keepFlag) this._destroyed = false;
     if (this._watchdogTimer != null) { clearInterval(this._watchdogTimer); this._watchdogTimer = null; }
     if (this._statsTimer != null) { clearInterval(this._statsTimer); this._statsTimer = null; }
-    for (const [, leg] of this.legs) { try { leg.call.close(); } catch { /* noop */ } }
+    for (const [, leg] of this.legs) { try { leg.call.close(); } catch { /* noop */ } clearTimeout(leg._cryptoTimer); clearTimeout(leg._neverTimer); try { clearTimeout((leg.call as any)?.__wlkDiscTimer); } catch { /* noop */ } }
     this.legs.clear();
     for (const [, conn] of this._dataConns) { try { conn.close(); } catch { /* noop */ } }
     this._dataConns.clear();
@@ -230,9 +237,14 @@ export class Mesh {
 
   async _rejoin(): Promise<void> {
     if (this._destroyed) return;
-    const ch = this.channel;
-    this.leave();
-    if (ch) await this.join(ch);
+    if (this._rejoinInFlight) return this._rejoinInFlight;
+    this._rejoinInFlight = (async (): Promise<void> => {
+      if (this._destroyed) return;
+      const ch = this.channel;
+      this.leave();
+      if (ch && !this._destroyed) await this.join(ch);
+    })().finally(() => { this._rejoinInFlight = null; });
+    return this._rejoinInFlight;
   }
 
   /* ── LEGS ──────────────────────────────────────────────── */
@@ -242,6 +254,7 @@ export class Mesh {
     const channel = this.channel;
     if (!secret || !channel) return;
     slotPeerId(secret, channel, slot).then((id) => {
+      if (this._destroyed) return;
       const peer = this.peer;
       if (!peer || peer.destroyed) return;
       if (this.legs.has(id)) return;
@@ -269,6 +282,7 @@ export class Mesh {
   /* Re-attempt lower-slot dials that were skipped for lack of an audio
      sender (pre-gesture Safari). Safe to call on every unlock. */
   retryPendingDials(): void {
+    if (this._destroyed) return;
     if (!this.peer || this.slot < 0 || state.tx) return;
     for (let j = 0; j < this.slot; j++) {
       const has = [...this.legs.values()].some((l) => l.slot === j);
@@ -288,6 +302,7 @@ export class Mesh {
     /* SECURITY: only calls whose ID is a valid secret-derived slot
        for OUR channel are answered. Everything else is dropped. */
     callerSlot(secret, channel, call.peer, this.cfg.maxSlots).then((slot) => {
+      if (this._destroyed || !this.peer) { try { call.close(); } catch { /* noop */ } return; }
       if (slot < 0 || slot === this.slot) {
         this.log('FOREIGN SIGNAL REJECTED', 'warn');
         try { call.close(); } catch { /* noop */ }
@@ -323,15 +338,32 @@ export class Mesh {
 
   _registerLeg(call: any, slot: number, mode: 'live' | 'listen'): Leg {
     const id = call.peer as string;
+    /* orphan kill: a redial/replace must never leave two live
+       PeerConnections for the same peer — close the stale one first. */
+    const prev = this.legs.get(id);
+    if (prev && prev.call !== call) {
+      try { prev.call.close(); } catch { /* noop */ }
+      clearTimeout(prev._cryptoTimer);
+      clearTimeout(prev._neverTimer);
+      try { clearTimeout((prev.call as any)?.__wlkDiscTimer); } catch { /* noop */ }
+    }
     const leg: Leg = { call, slot, mode, crypto: null };   // null=pending handshake
     this.legs.set(id, leg);
     this.knownOccupied.add(slot);
     setPeer(slot, { linked: true });
-    call.on('stream', (remote: MediaStream) => this._onRemoteStream(slot, remote));
+    call.on('stream', (remote: MediaStream) => {
+      if (this.legs.get(id)?.call !== call) return;   // stale event from a replaced leg
+      clearTimeout(leg._neverTimer);
+      leg._neverTimer = undefined;
+      this._onRemoteStream(slot, remote);
+    });
     call.on('close', () => {
       if (this.legs.get(id)?.call !== call) return;   // stale event from a replaced leg — no cross-kill
       clearTimeout(leg._cryptoTimer);
+      clearTimeout(leg._neverTimer);
+      try { clearTimeout(call.__wlkDiscTimer); } catch { /* noop */ }
       this.legs.delete(id);
+      this._closeDataConnFor(id);
       removePeer(slot);
       this.log(`LINK DROPPED — UNIT-${slot}`, 'warn');
       this.sfx?.linkLost();
@@ -340,15 +372,57 @@ export class Mesh {
     call.on('error', () => {
       if (this.legs.get(id)?.call !== call) return;   // stale event from a replaced leg — no cross-kill
       clearTimeout(leg._cryptoTimer);
+      clearTimeout(leg._neverTimer);
+      try { clearTimeout(call.__wlkDiscTimer); } catch { /* noop */ }
       this.legs.delete(id);
+      this._closeDataConnFor(id);
       removePeer(slot);
       this._emitCrypto();
     });
     this._watchIce(call, slot);
-    this._wireSas(call);
+    this._wireSas(call, leg);
     this._negotiateCrypto(call, leg);
+    this._armNeverConnected(call, leg);
     this._emitCrypto();
     return leg;
+  }
+
+  /** DataConn hygiene: close + drop the peer's crypto channel, but only
+      when the stored mapping is the one we expect (glare-safe). */
+  private _closeDataConnFor(peerId: string): void {
+    const conn = this._dataConns.get(peerId);
+    if (!conn) return;
+    try { conn.close(); } catch { /* noop */ }
+    if (this._dataConns.get(peerId) === conn) this._dataConns.delete(peerId);
+  }
+
+  /* STUN-only strand: with no TURN, a leg that never connects just sits
+     in new/checking/disconnected forever. Tear it down + redial after
+     ~10s unless media or a connected state arrives first. */
+  private _armNeverConnected(call: any, leg: Leg): void {
+    clearTimeout(leg._neverTimer);
+    leg._neverTimer = setTimeout(() => {
+      try {
+        if (this._destroyed) return;
+        const id = call.peer as string;
+        if (this.legs.get(id)?.call !== call) return;   // replaced — not ours
+        const cur = this.legs.get(id);
+        if (!cur || cur !== leg) return;
+        this.log(`ICE NEVER-CONNECTED — REDIAL UNIT-${leg.slot}`, 'warn');
+        try { call.close(); } catch { /* noop */ }
+        try { clearTimeout(call.__wlkDiscTimer); } catch { /* noop */ }
+        this.legs.delete(id);
+        this._closeDataConnFor(id);
+        removePeer(leg.slot);
+        this._emitCrypto();
+        if (state.tx) {
+          this._pendingRedial.add(leg.slot);
+        } else if (!this._destroyed) {
+          const rs = leg.slot;
+          setTimeout(() => { if (!this._destroyed) this._dialListen(rs); }, 1500);
+        }
+      } catch { /* noop */ }
+    }, 10_000);
   }
 
   /* ── E2EE CAPABILITY NEGOTIATION ─────────────────────────
@@ -359,14 +433,21 @@ export class Mesh {
   _negotiateCrypto(call: any, leg: Leg): void {
     leg._cryptoTimer = setTimeout(() => this._settleCrypto(leg, false, 'handshake timeout'), 3000);
     let conn: DataConnection | undefined = this._dataConns.get(call.peer);
-    if (!conn && this.peer && !this.peer.destroyed) {
+    /* reuse only a live channel — a dead mapping must not pin the leg
+       to a handshake that can never complete. */
+    if (conn && !(conn as unknown as { open?: boolean }).open) {
+      try { conn.close(); } catch { /* noop */ }
+      if (this._dataConns.get(call.peer) === conn) this._dataConns.delete(call.peer);
+      conn = undefined;
+    }
+    if (!conn && this.peer && !this.peer.destroyed && !this._destroyed) {
       try {
         const dc = this.peer.connect(call.peer, { serialization: 'json', reliable: true });
         if (dc) { this._dataConns.set(call.peer, dc); conn = dc; }
       } catch { conn = undefined; }
     }
     if (conn) this._wireCryptoConn(conn, leg);
-    else this._settleCrypto(leg, false, 'no data channel');
+    else { clearTimeout(leg._cryptoTimer); this._settleCrypto(leg, false, 'no data channel'); }
   }
 
   _wireCryptoConn(conn: DataConnection, leg: Leg): void {
@@ -381,6 +462,7 @@ export class Mesh {
       }
       if (m.t !== 'wlk1-hello' && m.t !== 'wlk1-ack') return;
       if (m.t === 'wlk1-hello') { try { conn.send({ t: 'wlk1-ack', e2ee: !!this.e2ee }); } catch { /* noop */ } }
+      clearTimeout(leg._cryptoTimer);
       this._settleCrypto(leg, !!m.e2ee, m.e2ee ? '' : 'peer lacks transforms');
     });
     conn.on('close', () => { if (this._dataConns.get(conn.peer) === conn) this._dataConns.delete(conn.peer); });
@@ -413,6 +495,7 @@ export class Mesh {
       if (late) this._wireCryptoConn(conn, late);
     });
     setTimeout(() => {
+      if (this._destroyed) return;
       if (!this.legs.has(conn.peer)) {
         try { conn.close(); } catch { /* noop */ }
         if (this._dataConns.get(conn.peer) === conn) this._dataConns.delete(conn.peer);
@@ -421,8 +504,10 @@ export class Mesh {
   }
 
   _settleCrypto(leg: Leg, remoteCapable: boolean, why = ''): void {
-    if (!leg || !this.legs.has(leg.call.peer)) { this._emitCrypto(); return; }
     clearTimeout(leg._cryptoTimer);
+    leg._cryptoTimer = undefined;
+    if (this._destroyed) return;
+    if (!leg || !this.legs.has(leg.call.peer)) { this._emitCrypto(); return; }
     const e2ee = this.e2ee;
     const capable = remoteCapable && !!e2ee;
     if (leg.crypto !== capable) {
@@ -436,6 +521,7 @@ export class Mesh {
              poll briefly before downgrading the leg to SRTP. */
           let tries = 0;
           const poll = (): void => {
+            if (this._destroyed) return;
             if (!this.legs.has(leg.call.peer)) return;
             const p = leg.call.peerConnection as RTCPeerConnection | null | undefined;
             if (p) {
@@ -452,7 +538,7 @@ export class Mesh {
             }
             setTimeout(poll, 250);
           };
-          setTimeout(poll, 250);
+          setTimeout(() => { if (!this._destroyed) poll(); }, 250);
         }
       } else {
         this.log(`UNIT-${leg.slot} — E2EE UNAVAILABLE (${why}) — SRTP LEG`, 'warn');
@@ -480,13 +566,34 @@ export class Mesh {
     emitCrypto(status);
   }
 
-  /* SAS collection runs regardless of capability (fingerprint truth) */
-  _wireSas(call: any): void {
+  /* SAS collection runs regardless of capability (fingerprint truth).
+     One-shot per leg: the first connected/completed signal (ICE or
+     PeerConnection) collects; later flaps are ignored. */
+  _wireSas(call: any, leg?: Leg): void {
     if (!this.e2ee) return;
+    const markDone = (): boolean => {
+      if ((call as any).__wlkSasDone) return true;
+      if (leg && leg._sasDone) return true;
+      (call as any).__wlkSasDone = true;
+      if (leg) leg._sasDone = true;
+      return false;
+    };
     const attach = (): void => {
+      if (this._destroyed) return;
       const pc = call.peerConnection as RTCPeerConnection | null | undefined;
       if (!pc) { setTimeout(attach, 100); return; }
-      pc.addEventListener('iceconnectionstatechange', () => this._collectSas(pc));
+      pc.addEventListener('iceconnectionstatechange', () => {
+        const st = (pc as RTCPeerConnection & { iceConnectionState?: string }).iceConnectionState;
+        if (st === 'connected' || (st as string) === 'completed') {
+          if (!markDone()) void this._collectSas(pc);
+        }
+      });
+      pc.addEventListener('connectionstatechange', () => {
+        const st = pc.connectionState;
+        if (st === 'connected' || (st as string) === 'completed') {
+          if (!markDone()) void this._collectSas(pc);
+        }
+      });
     };
     attach();
   }
@@ -499,10 +606,35 @@ export class Mesh {
 
   /* ── ICE ───────────────────────────────────────────────── */
   _watchIce(call: any, slot: number): void {
+    const legOf = (): Leg | undefined => {
+      const leg = this.legs.get(call.peer);
+      return leg?.call === call ? leg : undefined;
+    };
+    const teardownRedial = (why: string): void => {
+      const leg = legOf();
+      if (!leg) return;                        // stale event — not our leg anymore
+      clearTimeout(leg._cryptoTimer);
+      clearTimeout(leg._neverTimer);
+      try { clearTimeout(call.__wlkDiscTimer); } catch { /* noop */ }
+      try { call.close(); } catch { /* noop */ }
+      if (this.legs.get(call.peer)?.call === call) this.legs.delete(call.peer);
+      this._closeDataConnFor(call.peer);
+      removePeer(slot);
+      this._emitCrypto();
+      if (state.tx) {
+        this._pendingRedial.add(slot);
+        this.log(`${why} — REDIAL UNIT-${slot} DEFERRED UNTIL TX END`, 'warn');
+      } else if (!this._destroyed) {
+        this.log(`${why} — REDIAL UNIT-${slot}`, 'warn');
+        setTimeout(() => { if (!this._destroyed) this._dialListen(slot); }, 1500);
+      }
+    };
     const attach = (): void => {
+      if (this._destroyed) return;
       const pc = call.peerConnection as RTCPeerConnection | null | undefined;
       if (!pc) { setTimeout(attach, 100); return; }
       pc.addEventListener('connectionstatechange', () => {
+        if (this.legs.get(call.peer)?.call !== call) return;   // stale leg — ignore
         const st = pc.connectionState;
         if (st === 'disconnected') {
           /* transient — try ICE restart first (sub-second recovery).
@@ -513,8 +645,11 @@ export class Mesh {
           clearTimeout(call.__wlkDiscTimer);
           call.__wlkDiscTimer = setTimeout(() => {
             try {
+              if (this._destroyed) return;
+              if (this.legs.get(call.peer)?.call !== call) return;
               const cur = pc.connectionState;
               if ((cur === 'disconnected' || cur === 'failed') && this.legs.has(call.peer)) {
+                if (this.legs.get(call.peer)?.call !== call) return;
                 if (state.tx) {
                   /* mid-TX: never disturb the air — defer until endTx drains it */
                   this._pendingRedial.add(slot);
@@ -522,27 +657,37 @@ export class Mesh {
                 } else {
                   this.log(`ICE STUCK (${cur}) — REDIAL UNIT-${slot}`, 'warn');
                   try { call.close(); } catch { /* noop */ }
-                  this.legs.delete(call.peer);
+                  if (this.legs.get(call.peer)?.call === call) this.legs.delete(call.peer);
+                  this._closeDataConnFor(call.peer);
                   removePeer(slot);
-                  setTimeout(() => this._dialListen(slot), 1500);
+                  this._emitCrypto();
+                  setTimeout(() => { if (!this._destroyed) this._dialListen(slot); }, 1500);
                 }
               }
             } catch { /* noop */ }
           }, 5000);
         } else if (st === 'failed' || st === 'closed') {
           clearTimeout(call.__wlkDiscTimer);
-          try { call.close(); } catch { /* noop */ }
-          this.legs.delete(call.peer);
-          removePeer(slot);
-          if (state.tx) {
-            this._pendingRedial.add(slot);
-            this.log(`ICE FAILED — REDIAL UNIT-${slot} DEFERRED UNTIL TX END`, 'warn');
-          } else {
-            this.log(`ICE FAILED — REDIAL UNIT-${slot}`, 'warn');
-            setTimeout(() => this._dialListen(slot), 1500);
-          }
+          teardownRedial('ICE FAILED');
         } else if (st === 'connected' || (st as string) === 'completed') {
           clearTimeout(call.__wlkDiscTimer);
+          const leg = legOf();
+          if (leg) { clearTimeout(leg._neverTimer); leg._neverTimer = undefined; }
+        }
+      });
+      /* STUN-only strand: iceConnectionState is the earlier signal on
+         bare-STUN paths — clear the never-connected timer on success,
+         tear down promptly on terminal ice failure. */
+      pc.addEventListener('iceconnectionstatechange', () => {
+        if (this.legs.get(call.peer)?.call !== call) return;   // stale leg — ignore
+        const ist = (pc as RTCPeerConnection & { iceConnectionState?: string }).iceConnectionState;
+        if (ist === 'connected' || (ist as string) === 'completed') {
+          clearTimeout(call.__wlkDiscTimer);
+          const leg = legOf();
+          if (leg) { clearTimeout(leg._neverTimer); leg._neverTimer = undefined; }
+        } else if (ist === 'failed' || (ist as string) === 'closed') {
+          clearTimeout(call.__wlkDiscTimer);
+          teardownRedial('ICE FAILED');
         }
       });
     };
@@ -594,8 +739,10 @@ export class Mesh {
     const live = this.mic?.stream ?? null;
     if (redialSlots.length && secret && channel && live) {
       for (const rs of redialSlots) {
+        if (this._destroyed) break;
         try {
           const id = await slotPeerId(secret, channel, rs);
+          if (this._destroyed) break;
           const peer = this.peer;
           if (!peer || peer.destroyed) break;
           const call = peer.call(id, live);
@@ -608,8 +755,10 @@ export class Mesh {
          skipped pre-gesture) — dial all lower slots directly with the
          live mic stream. */
       for (let j = 0; j < this.slot; j++) {
+        if (this._destroyed) break;
         try {
           const id = await slotPeerId(secret, channel, j);
+          if (this._destroyed) break;
           const peer = this.peer;
           if (!peer || peer.destroyed) break;
           const call = peer.call(id, live);
@@ -675,8 +824,25 @@ export class Mesh {
   _startWatchdog(): void {
     if (this._watchdogTimer != null) clearInterval(this._watchdogTimer);
     this._watchdogTimer = setInterval(() => {
+      if (this._destroyed) return;
       if (typeof document !== 'undefined' && document.hidden) return;
       if (state.tx) return;                       // never disturb an active TX
+      if (!this.peer || this.peer.destroyed || this.slot < 0) return;
+      if (this.legs.size === 0) {
+        /* zero-leg probe: knownOccupied is empty after a fresh join or a
+           rejoin partition, and slot-0 never dials anyone — sweep every
+           slot except our own so isolates and rejoiners rediscover the
+           mesh instead of deadlocking alone. */
+        for (let j = 0; j < this.cfg.maxSlots; j++) {
+          if (j === this.slot) continue;
+          const linked = [...this.legs.values()].some((l) => l.slot === j);
+          if (!linked) {
+            this.log(`WATCHDOG — REDIAL UNIT-${j}`, 'sys');
+            this._dialListen(j);
+          }
+        }
+        return;
+      }
       for (const slot of this.knownOccupied) {
         if (slot === this.slot) continue;
         const linked = [...this.legs.values()].some((l) => l.slot === slot);

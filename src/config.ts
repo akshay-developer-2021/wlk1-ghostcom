@@ -11,6 +11,9 @@
 export interface SignalingConfig {
   host?: string | undefined;
   secure: boolean;
+  port?: number | undefined;
+  path?: string | undefined;
+  key?: string | undefined;
 }
 
 export interface ReconnectConfig {
@@ -43,6 +46,9 @@ export interface AppConfig {
 export interface WindowWlk1Config {
   signalingHost?: string;
   signalingSecure?: boolean;
+  signalingPort?: number;
+  signalingPath?: string;
+  signalingKey?: string;
   iceServers?: IceServer[];
 }
 
@@ -129,6 +135,15 @@ function buildConfig(): AppConfig {
     if (typeof broker['secure'] === 'boolean') {
       cfg.signaling = { ...cfg.signaling, secure: broker['secure'] };
     }
+    if (typeof broker['port'] === 'number' && Number.isFinite(broker['port'])) {
+      cfg.signaling = { ...cfg.signaling, port: broker['port'] };
+    }
+    if (typeof broker['path'] === 'string' && broker['path'].trim()) {
+      cfg.signaling = { ...cfg.signaling, path: broker['path'].trim() };
+    }
+    if (typeof broker['key'] === 'string' && broker['key'].trim()) {
+      cfg.signaling = { ...cfg.signaling, key: broker['key'].trim() };
+    }
   }
   const turn = asIceServers(readJson(TURN_STORE_KEY));
   if (turn) cfg.iceServers = turn;
@@ -142,6 +157,15 @@ function buildConfig(): AppConfig {
       }
       if (typeof w.signalingSecure === 'boolean') {
         cfg.signaling = { ...cfg.signaling, secure: w.signalingSecure };
+      }
+      if (typeof w.signalingPort === 'number' && Number.isFinite(w.signalingPort)) {
+        cfg.signaling = { ...cfg.signaling, port: w.signalingPort };
+      }
+      if (typeof w.signalingPath === 'string' && w.signalingPath.trim()) {
+        cfg.signaling = { ...cfg.signaling, path: w.signalingPath.trim() };
+      }
+      if (typeof w.signalingKey === 'string' && w.signalingKey.trim()) {
+        cfg.signaling = { ...cfg.signaling, key: w.signalingKey.trim() };
       }
       const ice = asIceServers(w.iceServers);
       if (ice) cfg.iceServers = ice;

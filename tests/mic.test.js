@@ -2,10 +2,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MicManager } from '../src/audio/mic.js';
 
 function fakeTrack(label = 't') {
+  const listeners = {};
   return {
-    label, kind: 'audio', enabled: true, stopped: false,
+    label, kind: 'audio', enabled: true, stopped: false, readyState: 'live',
     stop() { this.stopped = true; },
-    addEventListener() {},
+    addEventListener(ev, cb) { (listeners[ev] ??= []).push(cb); },
+    fire(ev, ...args) { for (const cb of listeners[ev] ?? []) cb(...args); },
   };
 }
 function fakeGum() {
@@ -105,5 +107,47 @@ describe('MicManager — cold mic policy', () => {
     mm.mute();
     expect(streams[0].getTracks()[0].stopped).toBe(true);
     expect(mm.warm).toBe(false);
+  });
+});
+
+describe('MicManager — dead-track recovery (readyState)', () => {
+  it('ended warm track falls through to a cold re-acquire (new hardware stream)', async () => {
+    const { mm, streams } = makeManager();
+    await mm.acquire();
+    mm.mute();
+    expect(mm.warm).toBe(true);
+    streams[0].getTracks()[0].readyState = 'ended';   // OS revoked / device lost
+    const r = await mm.acquire();
+    expect(streams).toHaveLength(2);                  // cold getUserMedia again
+    expect(streams[0].getTracks()[0].stopped).toBe(true);   // corpse released
+    expect(r.stream).toBe(streams[1]);
+    expect(mm.hot).toBe(true);
+    expect(mm.warm).toBe(false);
+  });
+
+  it('warm stream with zero audio tracks is released and reacquired cold', async () => {
+    const { mm, streams } = makeManager();
+    await mm.acquire();
+    mm.mute();
+    streams[0].getAudioTracks = () => [];             // device vanished mid-window
+    const r = await mm.acquire();
+    expect(streams).toHaveLength(2);
+    expect(r.stream).toBe(streams[1]);
+    expect(mm.hot).toBe(true);
+    expect(mm.warm).toBe(false);
+  });
+
+  it('track ended event fires onEnded handlers and performs a hard reset', async () => {
+    const { mm } = makeManager();
+    await mm.acquire();
+    const spy = vi.fn();
+    mm.onEnded(spy);
+    const gen = mm.generation;
+    mm.stream.getAudioTracks()[0].fire('ended');      // e.g. OS revoked the mic
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(mm.stream).toBeNull();
+    expect(mm.hot).toBe(false);
+    expect(mm.warm).toBe(false);
+    expect(mm.generation).not.toBe(gen);              // stale acquires invalidated
   });
 });

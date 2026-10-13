@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  generateRoomSecret, isValidRoomSecret, slotPeerId, callerSlot,
+  generateRoomSecret, isValidRoomSecret, normalizeRoomSecret, slotPeerId, callerSlot,
   sasCode, parseChannelHash, buildShareLink,
 } from '../src/core/crypto.js';
 
@@ -90,3 +90,26 @@ describe('deep links', () => {
     expect(parseChannelHash(hash)).toEqual({ channel: '42', secret: 'ABC234DEF567' });
   });
 });
+
+describe('normalizeRoomSecret — paste-tolerant secrets', () => {
+  it('trims whitespace and uppercases', () => {
+    expect(normalizeRoomSecret('  abc234  ')).toBe('ABC234');
+    expect(normalizeRoomSecret('AbC234')).toBe('ABC234');
+    expect(normalizeRoomSecret('\tabc234\n')).toBe('ABC234');
+  });
+
+  it('non-strings normalize to empty (never throw)', () => {
+    expect(normalizeRoomSecret(null)).toBe('');
+    expect(normalizeRoomSecret(undefined)).toBe('');
+    expect(normalizeRoomSecret(42)).toBe('');
+    expect(normalizeRoomSecret({})).toBe('');
+    expect(normalizeRoomSecret('')).toBe('');
+  });
+
+  it('normalized output validates when the pasted secret is legit', () => {
+    expect(isValidRoomSecret(normalizeRoomSecret('  abc234def567  '))).toBe(true);
+  });
+});
+
+/* NOTE: main.ts passphrase→secret KDF is owned by another stream (it will
+   export the helper); KDF tests are explicitly out of scope here. */

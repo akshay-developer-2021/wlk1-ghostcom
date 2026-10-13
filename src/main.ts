@@ -30,7 +30,7 @@ import { Sfx, HAPTIC } from './audio/sfx.js';
 import { Mesh, onQuality, onCrypto } from './webrtc/mesh.js';
 import { resumeSilentContext } from './audio/silentTrack.js';
 import { $, log, toast, setSync, countPkt } from './ui/dom.js';
-import { safeGet, safeSet, safeRemove, safeSessGet, safeSessSet } from './ui/dom.js';
+import { safeGet, safeSet, safeRemove, safeSessGet, safeSessSet, safeSessRemove } from './ui/dom.js';
 import { createPTT } from './ui/ptt.js';
 import { createLoop } from './ui/loop.js';
 import { bootSequence, matrixRain, showHintOnce, fit } from './ui/boot.js';
@@ -61,7 +61,7 @@ const mesh = new Mesh({ sfx, mic, e2ee, log: logFn, config: CONFIG });
 const meshRt: MeshRuntime = mesh as unknown as MeshRuntime;
 const ptt = createPTT({
   mesh, mic, sfx, power, config: CONFIG,
-  onAnalyser: (s: MediaStream) => loop.registerTx(analyserFor(s)),
+  onAnalyser: (s: MediaStream) => { const t = analyserFor(s); loop.registerTx(t.an, t.src); },
 });
 
 power.init();
@@ -73,14 +73,24 @@ type JoinMode = 'link' | 'pass';
 let routeName: RouteName = 'join';
 let radioStarted = false;   // initSession runs once, on first radio entry
 let joinMode: JoinMode = 'link';
+/* Last join's remember-me choice. Gates dial/share persistence so a
+   no-persist session never silently writes keys to localStorage. */
+let sessionPersist = false;
 
 const VIEWS: Record<RouteName, string> = { radio: 'view-radio', join: 'view-join', settings: 'view-settings' };
 
 function showScreen(name: RouteName): void {
+  if (routeName === 'radio' && name !== 'radio') clearWords(); // leaving the room: words never linger
   routeName = name;
   for (const [k, id] of Object.entries(VIEWS) as [RouteName, string][]) {
     document.getElementById(id)?.classList.toggle('hidden', k !== name);
   }
+  // Land keyboard users somewhere operable on the revealed screen.
+  const shown = document.getElementById(VIEWS[name]);
+  const target = shown?.querySelector(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
+  );
+  if (target instanceof HTMLElement) target.focus({ preventScroll: true });
 }
 
 function pad2(raw: string): string {
@@ -109,8 +119,29 @@ function route(): void {
   }
   const parsed = parseChannelHash(hash);
   if (parsed?.channel && parsed.secret) {
-    // Full share link → radio immediately (back-compat). Validation
-    // (normalize → validate) happens inside enterRadio/joinRoom.
+    // Full share link: normalize → validate BEFORE touching radio state.
+    // Mutated/typed-by-hand secrets are rejected loudly, never minted.
+    const norm = normalizeRoomSecret(parsed.secret);
+    if (!isValidRoomSecret(norm)) {
+      joinError('BAD KEY — CHECK LINK');
+      log(`BAD KEY — REJECTED FOR CH ${parsed.channel} — CHECK LINK`, 'warn');
+      prefillJoin(parsed.channel);
+      showScreen('join');
+      return;
+    }
+    if (radioStarted) {
+      if (state.channel === parsed.channel && state.secret === norm) {
+        showScreen('radio'); // same room: no-op, never rejoin
+        return;
+      }
+      // In-session hash navigation to a DIFFERENT room → rejoin it.
+      // Direct-hash-open semantics: the link key persists.
+      log(`CH ${parsed.channel} FROM LINK`, 'sys');
+      toast(`CH ${parsed.channel} FROM LINK — JOINED`);
+      showScreen('radio');
+      void joinRoom(parsed.channel, norm, true).then((ok) => { if (ok) syncRadioHash(); });
+      return;
+    }
     showScreen('radio');
     void initSession();
     return;
@@ -141,12 +172,19 @@ interface JoinResult {
 
 async function joinRoom(channel: string, secret: string, persist: boolean): Promise<boolean> {
   const norm = normalizeRoomSecret(secret);
-  const finalSecret = isValidRoomSecret(norm) ? norm : generateRoomSecret();
-  set({ channel, secret: finalSecret });
+  if (!isValidRoomSecret(norm)) {
+    // REJECT: never mint a fresh key for a bad link, never overwrite good
+    // saved keys, never sync the hash.
+    joinError('BAD KEY — CHECK LINK');
+    log(`BAD KEY — REJECTED FOR CH ${channel} — CHECK LINK`, 'warn');
+    return false;
+  }
+  sessionPersist = persist;
+  set({ channel, secret: norm });
   await rekeyE2EE();                       // keys ready BEFORE any leg dials
   if (persist) {
     safeSet('wlk1-ch', channel);
-    safeSet('wlk1-key', finalSecret);
+    safeSet('wlk1-key', norm);
   }
   digitBuf = channel.split('');
   updateDisplay();
@@ -162,42 +200,67 @@ async function initSession(): Promise<void> {
   radioStarted = true;
   const fromHash = parseChannelHash(location.hash);
   if (fromHash?.channel && fromHash.secret) {
+    const norm = normalizeRoomSecret(fromHash.secret);
+    if (!isValidRoomSecret(norm)) {
+      joinError('BAD KEY — CHECK LINK');
+      log(`BAD KEY — REJECTED FOR CH ${fromHash.channel} — CHECK LINK`, 'warn');
+      prefillJoin(fromHash.channel);
+      showScreen('join');
+      return;
+    }
     set({
       channel: fromHash.channel,
-      secret: normalizeRoomSecret(fromHash.secret),
+      secret: norm,
     });
     log(`CH ${fromHash.channel} FROM LINK`, 'sys');
     toast(`CH ${fromHash.channel} FROM LINK — JOINED`);
     showHintOnce();
-    await joinRoom(fromHash.channel, state.secret as string, true);
+    await joinRoom(fromHash.channel, norm, true);
     syncRadioHash();
     return;
   }
   const channel = (typeof state.channel === 'string' && /^\d{2}$/.test(state.channel))
     ? state.channel
     : (validChannel(safeGet('wlk1-ch')) ?? '22');
-  const secret = typeof state.secret === 'string' ? state.secret : (safeGet('wlk1-key') ?? '');
+  const savedRaw = typeof state.secret === 'string' ? state.secret : (safeGet('wlk1-key') ?? '');
+  const normSaved = normalizeRoomSecret(savedRaw);
+  if (!isValidRoomSecret(normSaved)) {
+    // No usable saved key and no link key: Join screen instead of minting
+    // a silent fresh key nobody else holds.
+    log('NO SAVED KEY — JOIN A CHANNEL FIRST', 'warn');
+    prefillJoin(/^\d{2}$/.test(channel) ? channel : null);
+    showScreen('join');
+    return;
+  }
   showHintOnce();
-  await joinRoom(channel, secret, true);
+  await joinRoom(channel, normSaved, true);
   syncRadioHash();
 }
 
 /** Enter radio from the Join screen / recents (session path, not hash). */
 async function enterRadio(channel: string, secret: string, persist: boolean): Promise<void> {
+  const norm = normalizeRoomSecret(secret);
+  if (!isValidRoomSecret(norm)) {
+    joinError('BAD KEY — CHECK LINK');
+    log(`BAD KEY — REJECTED FOR CH ${channel} — CHECK LINK`, 'warn');
+    showScreen('join');
+    return;
+  }
   showScreen('radio');
   if (!radioStarted) {
     radioStarted = true;
     showHintOnce();
   }
-  await joinRoom(channel, secret, persist);
+  await joinRoom(channel, norm, persist);
   syncRadioHash();
 }
 
-/** Keep the URL shareable: reflect the live channel+secret in the hash. */
+/** Keep the URL shareable: reflect the live channel+secret in the hash.
+    replaceState (not assignment) so Back never walks stale rooms. */
 function syncRadioHash(): void {
   if (typeof state.channel === 'string' && typeof state.secret === 'string') {
     const want = `#${state.channel}.${state.secret}`;
-    if (location.hash !== want) location.hash = want;
+    if (location.hash !== want) history.replaceState(null, '', want);
   }
 }
 
@@ -245,27 +308,23 @@ export function passphraseStrength(pw: string): { score: number; label: string }
   return { score, label };
 }
 
-async function deriveSecretFromPassphrase(pass: string, channel: string): Promise<string> {
+export async function deriveSecretFromPassphrase(pass: string, channel: string): Promise<string> {
   const norm = pass.normalize('NFKC').trim(); // case-sensitive: no lowercasing
   const salt = new TextEncoder().encode(`wlk1-v1-CH${channel}`);
+  // argon2id ONLY — deliberately NO PBKDF2 fallback. The two KDFs derive
+  // different secrets for the same input, so a silent fallback splits rooms.
+  // When the CSP blocks the wasm build this throws loudly instead.
   try {
-    // DYNAMIC import only here — argon2 wasm stays out of the boot chunk.
-    const { argon2id } = await import('hash-wasm');
-    const raw = await argon2id({
+    // DYNAMIC deep import — argon2-only UMD (~29K). The flat 'hash-wasm'
+    // ESM entry ships all 21 algorithms (~216K) and defeats treeshaking.
+    const { default: argon2 } = await import('hash-wasm/dist/argon2.umd.min.js');
+    const raw = await argon2.argon2id({
       password: norm, salt, parallelism: 1, iterations: 2,
       memorySize: 19456, hashLength: 10, outputType: 'binary',
     });
     return bytesToSecret(raw);
   } catch {
-    // Fallback: WebCrypto PBKDF2-SHA256 120k → 80 bits → 16 secret chars.
-    const base = await crypto.subtle.importKey(
-      'raw', new TextEncoder().encode(norm), 'PBKDF2', false, ['deriveBits'],
-    );
-    const bits = await crypto.subtle.deriveBits(
-      { name: 'PBKDF2', salt: salt as BufferSource, iterations: 120_000, hash: 'SHA-256' },
-      base, 80,
-    );
-    return bytesToSecret(new Uint8Array(bits));
+    throw new Error('KDF UNAVAILABLE — WASM BLOCKED');
   }
 }
 
@@ -284,17 +343,25 @@ function readRecents(): RecentRoom[] {
     if (!raw) return [];
     const arr = JSON.parse(raw) as unknown;
     if (!Array.isArray(arr)) return [];
+    // Corrupt entries (bad channel, non-null secret that fails validation)
+    // are dropped, never joined.
     return arr.filter((e): e is RecentRoom =>
       typeof e === 'object' && e !== null &&
-      typeof (e as RecentRoom).ch === 'string' && /^\d{2}$/.test((e as RecentRoom).ch));
+      typeof (e as RecentRoom).ch === 'string' && /^\d{2}$/.test((e as RecentRoom).ch) &&
+      ((e as RecentRoom).secret === null ||
+        isValidRoomSecret(normalizeRoomSecret((e as RecentRoom).secret))));
   } catch {
     return [];
   }
 }
 
 function pushRecent(ch: string, secret: string | null): void {
+  // Recents hold secrets only when persisting; anything corrupt degrades to
+  // null (needs key) rather than joining a bad room.
+  const clean = secret !== null && isValidRoomSecret(normalizeRoomSecret(secret))
+    ? normalizeRoomSecret(secret) : null;
   const list = readRecents().filter((r) => r.ch !== ch);
-  list.unshift({ ch, secret, ts: Date.now() });
+  list.unshift({ ch, secret: clean, ts: Date.now() });
   safeSet(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX)));
 }
 
@@ -333,7 +400,16 @@ function renderRecents(): void {
 }
 
 /* ── join screen wiring ───────────────────────────────────── */
+/* Passphrase words live in sessionStorage only and are wiped on mode
+   switch, room leave, new identity, and tab-hide (see clearWords). */
+function clearWords(): void {
+  safeSessRemove(PASS_STORE_KEY);
+  const passEl = $('joinPass');
+  if (passEl instanceof HTMLInputElement) passEl.value = '';
+}
+
 function setJoinMode(mode: JoinMode): void {
+  if (mode !== joinMode) clearWords(); // words never survive a mode switch
   joinMode = mode;
   $('tabLink')?.classList.toggle('active', mode === 'link');
   $('tabPass')?.classList.toggle('active', mode === 'pass');
@@ -389,22 +465,46 @@ async function doJoin(): Promise<void> {
 
   const btn = $('joinBtn');
   if (btn instanceof HTMLButtonElement) { btn.disabled = true; }
+  // Remember-me governs BOTH join modes: only a checked box persists the
+  // fresh/derived secret (and channel). Direct #CH.SECRET hash opens still
+  // default to persist (see initSession/route).
+  const remember = $('rememberMe') instanceof HTMLInputElement
+    && ($('rememberMe') as HTMLInputElement).checked;
 
   try {
     if (joinMode === 'link') {
       const secret = generateRoomSecret();
-      pushRecent(channel, secret);
-      log(`CH ${channel} MANUAL JOIN — FRESH KEY`, 'sys');
-      await enterRadio(channel, secret, true);
+      if (remember) {
+        safeSet('wlk1-ch', channel);
+        safeSet('wlk1-key', secret);
+        pushRecent(channel, secret);
+      } else {
+        safeRemove('wlk1-ch');
+        safeRemove('wlk1-key');
+        pushRecent(channel, null);
+      }
+      log(`CH ${channel} MANUAL JOIN — FRESH KEY${remember ? '' : ' (NOT SAVED)'}`, 'sys');
+      await enterRadio(channel, secret, remember);
     } else {
       const passEl = $('joinPass');
       const words = passEl instanceof HTMLInputElement ? passEl.value.normalize('NFKC').trim() : '';
       if (words.length < 4) { joinError('PASSPHRASE TOO SHORT — 4+ CHARS'); return; }
+      // The meter is display-only; the floor is enforced here.
+      if (passphraseStrength(words).score < 2) {
+        joinError('PASSPHRASE TOO WEAK — 3+ WORDS OR 16+ CHARS');
+        return;
+      }
       if (btn instanceof HTMLButtonElement) btn.textContent = 'DERIVING…';
-      const secret = await deriveSecretFromPassphrase(words, channel);
+      let secret: string;
+      try {
+        secret = await deriveSecretFromPassphrase(words, channel);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        joinError(`JOIN FAILED — ${msg}`);
+        log(`KDF FAILURE — ${msg}`, 'warn');
+        return;
+      }
       safeSessSet(PASS_STORE_KEY, words); // words: session only, never localStorage
-      const remember = $('rememberMe') instanceof HTMLInputElement
-        && ($('rememberMe') as HTMLInputElement).checked;
       if (remember) {
         // Opt-in: persist the DERIVED secret, never the words.
         safeSet('wlk1-ch', channel);
@@ -415,11 +515,13 @@ async function doJoin(): Promise<void> {
         safeRemove('wlk1-key');
         pushRecent(channel, null);
       }
-      log(`CH ${channel} PASSPHRASE JOIN — KEY DERIVED`, 'sys');
+      log(`CH ${channel} PASSPHRASE JOIN — KEY DERIVED${remember ? '' : ' (NOT SAVED)'}`, 'sys');
       await enterRadio(channel, secret, remember);
     }
   } catch (err) {
-    joinError(`JOIN FAILED — ${err instanceof Error ? err.message : String(err)}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    joinError(`JOIN FAILED — ${msg}`);
+    log(`JOIN FAILED — ${msg}`, 'warn');
   } finally {
     if (btn instanceof HTMLButtonElement) {
       btn.disabled = false;
@@ -489,6 +591,7 @@ function setupSettings(): void {
 }
 
 async function newIdentity(): Promise<void> {
+  clearWords();
   const fresh = generateRoomSecret();
   set({ secret: fresh });
   safeSet('wlk1-key', fresh);
@@ -526,11 +629,19 @@ async function enterDigit(n: number): Promise<void> {
 
 async function dial(channel: string): Promise<void> {
   if (meshRt.peer && state.channel === channel) return;
-  const secret = (typeof state.secret === 'string' && isValidRoomSecret(normalizeRoomSecret(state.secret)))
-    ? (state.secret as string)
-    : generateRoomSecret();
-  const ok = await joinRoom(channel, secret, true);
-  if (ok) syncRadioHash();
+  const norm = normalizeRoomSecret(typeof state.secret === 'string' ? state.secret : '');
+  if (!isValidRoomSecret(norm)) {
+    joinError('BAD KEY — CHECK LINK');
+    log(`BAD KEY — DIAL TO CH ${channel} REFUSED — CHECK LINK`, 'warn');
+    return;
+  }
+  const ok = await joinRoom(channel, norm, sessionPersist);
+  if (ok) {
+    // Dial is explicit: the channel follows even in no-persist sessions,
+    // but the secret is written only when the session persists.
+    if (!sessionPersist) safeSet('wlk1-ch', channel);
+    syncRadioHash();
+  }
 }
 
 function setupKeypad(): void {
@@ -558,9 +669,18 @@ function setupKeypad(): void {
      Shortcuts are radio-only; on Join/Settings only Esc is honored. */
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.repeat || inField(e.target)) return;
+    // Hint modal open: every radio shortcut is dead except Esc (close)
+    // and H/? (toggle). Nothing else may fire underneath the dialog.
+    if (hintOpen()) {
+      if (e.key === 'Escape') { toggleHint(false); return; }
+      if (e.key.toLowerCase() === 'h' || e.key === '?') { toggleHint(); return; }
+      return;
+    }
     const k = e.key;
     if (routeName !== 'radio') {
       if (k === 'Escape') {
+        // Fallback: show the screen directly AND set the hash —
+        // hashchange may not fire when the hash is unchanged.
         if (radioStarted) {
           if (typeof state.channel === 'string' && typeof state.secret === 'string') {
             location.hash = `#${state.channel}.${state.secret}`;
@@ -570,6 +690,9 @@ function setupKeypad(): void {
       }
       return;
     }
+    // Space/Enter PTT lives in ptt.ts: never swallow Space here — in
+    // particular not when #volSlider is focused.
+    if (k === ' ' || k === 'Spacebar') return;
     if (/^[0-9]$/.test(k) && document.activeElement?.tagName !== 'INPUT') { void enterDigit(+k); return; }
     if (k === 'Backspace') { digitBuf.pop(); updateDisplay(); return; }
     if (k === 'Escape') {
@@ -578,7 +701,7 @@ function setupKeypad(): void {
       return;
     }
     const lk = k.toLowerCase();
-    if (lk === 't' && !hintOpen()) { e.preventDefault(); ptt.press(undefined); return; } // laptop PTT alt
+    if (lk === 't') { e.preventDefault(); ptt.press(undefined); return; } // laptop PTT alt
     if (lk === 'm') { void micTest(); return; }
     if (lk === 's') { shareChannel(); return; }
     if (lk === 'l') { copyAllLogs(); return; }
@@ -591,7 +714,12 @@ function setupKeypad(): void {
     }
   });
   window.addEventListener('keyup', (e: KeyboardEvent) => {
-    if (routeName === 'radio' && e.key.toLowerCase() === 't') ptt.release();
+    // Mirror the keydown guards so a held T can't stick when the dialog
+    // opens mid-hold or focus sits in a field.
+    if (e.repeat || inField(e.target)) return;
+    if (hintOpen()) return;
+    if (routeName !== 'radio') return;
+    if (e.key.toLowerCase() === 't') ptt.release();
   });
 }
 
@@ -618,11 +746,19 @@ async function micTest(): Promise<void> {
 function shareChannel(): void {
   const raw = typeof state.secret === 'string' ? state.secret : '';
   const norm = normalizeRoomSecret(raw);
-  const secret = isValidRoomSecret(norm) ? norm : generateRoomSecret();
-  set({ secret });
-  safeSet('wlk1-ch', state.channel || '22');
-  safeSet('wlk1-key', secret);
-  const url = buildShareLink(state.channel || '22', secret, location.origin, location.pathname);
+  if (!isValidRoomSecret(norm)) {
+    joinError('BAD KEY — CHECK LINK');
+    log('BAD KEY — SHARE REFUSED — CHECK LINK', 'warn');
+    return;
+  }
+  if (norm !== raw) set({ secret: norm });
+  // A share never opts into persistence by itself: keys are written only
+  // when the session persists (remember-me).
+  if (sessionPersist) {
+    safeSet('wlk1-ch', state.channel || '22');
+    safeSet('wlk1-key', norm);
+  }
+  const url = buildShareLink(state.channel || '22', norm, location.origin, location.pathname);
   const done = (): void => {
     toast(`LINK COPIED — CH ${state.channel}`);
     log(`URL EXPORTED — CH ${state.channel} (+KEY)`, 'sys');
@@ -665,8 +801,6 @@ function copyAllLogs(): void {
     ta.remove();
   }
 }
-$('copyLogsBtn')?.addEventListener('click', copyAllLogs);
-
 /* ── remote audio + analysers ─────────────────────────────── */
 const audioEls = new Map<number, HTMLAudioElement>();
 const audioStreams = new Map<number, MediaStream>();
@@ -700,7 +834,7 @@ on('peers', (v: unknown) => {
         audioEls.set(slot, a);
         audioStreams.set(slot, p.stream);
         a.play().catch(() => toast('TAP TO UNMUTE'));
-        try { loop.registerRemote(slot, analyserFor(p.stream)); } catch { /* noop */ }
+        try { const t = analyserFor(p.stream); loop.registerRemote(slot, t.an, t.src); } catch { /* noop */ }
       } else if (known !== p.stream) {
         // Stream identity changed (renegotiation) — swap srcObject.
         a.srcObject = p.stream;
@@ -708,7 +842,8 @@ on('peers', (v: unknown) => {
         audioStreams.set(slot, p.stream);
         try {
           loop.unregisterRemote(slot);
-          loop.registerRemote(slot, analyserFor(p.stream));
+          const t = analyserFor(p.stream);
+          loop.registerRemote(slot, t.an, t.src);
         } catch { /* noop */ }
         a.play().catch(() => { /* gesture-gated; unlockAudio replays */ });
       }
@@ -746,9 +881,12 @@ function updateGlow(peers?: Map<number, PeerInfo>): void {
   const rx = !state.tx && [...map.values()].some((p) => p.linked && p.speaking);
   shell.classList.toggle('tx-glow', state.tx === true);
   shell.classList.toggle('rx-glow', rx);
+  // Antenna lamp follows the actual link state. #batt untouched (deferred).
+  $('antenna')?.classList.toggle('live', state.joined === true || state.tx === true);
 }
 
 on('tx', () => updateGlow());
+on('joined', () => updateGlow());
 
 function renderChips(peers: Map<number, PeerInfo>): void {
   const box = $('peers');
@@ -766,7 +904,7 @@ function renderChips(peers: Map<number, PeerInfo>): void {
   }));
 }
 
-function analyserFor(stream: MediaStream): AnalyserNode {
+function analyserFor(stream: MediaStream): { an: AnalyserNode; src: AudioNode } {
   sfx.unlock();
   const ctx = sfx.ctx;
   if (!ctx) throw new Error('AudioContext unavailable');
@@ -774,7 +912,7 @@ function analyserFor(stream: MediaStream): AnalyserNode {
   const an = ctx.createAnalyser();
   an.fftSize = 64;
   src.connect(an);
-  return an;
+  return { an, src };
 }
 
 /* ── LCD bindings ─────────────────────────────────────────── */
@@ -851,6 +989,9 @@ setupSettings();
 fit();
 window.addEventListener('resize', fit, { passive: true });
 window.addEventListener('hashchange', route);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) clearWords(); // words never linger in a backgrounded tab
+});
 bootSequence(['MEM OK', `CRYPTO ${E2EE.supported() ? 'E2EE-READY' : 'SRTP'}`, 'MIC COLD']);
 matrixRain();
 log(`WLK-1 INIT — GHOSTCOM ONLINE — ${E2EE.supported() ? 'E2EE SUPPORTED' : 'SRTP ONLY ON THIS BROWSER'}`, 'sys');

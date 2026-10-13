@@ -24,9 +24,9 @@ export interface LoopOptions {
 }
 
 export interface RenderLoop {
-  registerTx: (analyser: AnalyserNode | null) => void;
+  registerTx: (analyser: AnalyserNode | null, src?: AudioNode | null) => void;
   clearTx: () => void;
-  registerRemote: (slot: number, analyser: AnalyserNode) => void;
+  registerRemote: (slot: number, analyser: AnalyserNode, src?: AudioNode | null) => void;
   unregisterRemote: (slot: number) => void;
   reset: () => void;
   kick: () => void;
@@ -35,6 +35,7 @@ export interface RenderLoop {
 interface RemoteTap {
   an: AnalyserNode;
   data: Uint8Array<ArrayBuffer>;
+  src: AudioNode | null;
 }
 
 const IDLE_MS = 3000;
@@ -43,6 +44,7 @@ const BARS = (): NodeListOf<HTMLElement> => document.querySelectorAll<HTMLElemen
 export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
   let txAnalyser: AnalyserNode | null = null;
   let txData: Uint8Array<ArrayBuffer> | null = null;
+  let txSrc: AudioNode | null = null;
   const remotes = new Map<number, RemoteTap>();   // slot -> {an, data}
   const chipCache = new Map<number, Element | null>(); // slot -> element
   const declaredSpeaking = new Map<number, boolean>(); // slot -> peer-reported PTT
@@ -61,23 +63,43 @@ export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
     }
   });
 
-  function registerTx(analyser: AnalyserNode | null): void {
+  /** Disconnect a tap's graph edges so a replaced tap stops pulling
+      its old stream. Never throws — safe on any teardown path. */
+  function dropTap(tap: RemoteTap | undefined): void {
+    if (!tap) return;
+    try { tap.src?.disconnect(); } catch { /* noop */ }
+    try { tap.an.disconnect(); } catch { /* noop */ }
+  }
+
+  function registerTx(analyser: AnalyserNode | null, src?: AudioNode | null): void {
+    /* every TX press builds a fresh source — drop the previous one or it
+       keeps pulling the old stream (one leaked source per press) */
+    if (txSrc) { try { txSrc.disconnect(); } catch { /* noop */ } txSrc = null; }
+    try { txAnalyser?.disconnect(); } catch { /* noop */ }
     txAnalyser = analyser;
     txData = analyser ? new Uint8Array(analyser.frequencyBinCount) : null;
+    txSrc = src ?? null;
     BARS().forEach((b) => b.classList.add('live'));
     kick();
   }
   function clearTx(): void {
+    if (txSrc) { try { txSrc.disconnect(); } catch { /* noop */ } txSrc = null; }
+    try { txAnalyser?.disconnect(); } catch { /* noop */ }
     txAnalyser = null; txData = null;
     BARS().forEach((b) => { b.style.height = '4px'; b.classList.remove('live'); });
   }
-  function registerRemote(slot: number, analyser: AnalyserNode): void {
-    remotes.set(slot, { an: analyser, data: new Uint8Array(analyser.frequencyBinCount) });
+  function registerRemote(slot: number, analyser: AnalyserNode, src?: AudioNode | null): void {
+    /* stream-swap re-register: disconnect the previous slot source before
+       replacing it, or the orphaned MediaStreamSource keeps pulling the
+       old stream — a graph leak per renegotiation */
+    dropTap(remotes.get(slot));
+    remotes.set(slot, { an: analyser, data: new Uint8Array(analyser.frequencyBinCount), src: src ?? null });
     kick();
   }
-  function unregisterRemote(slot: number): void { remotes.delete(slot); }
+  function unregisterRemote(slot: number): void { dropTap(remotes.get(slot)); remotes.delete(slot); }
   function reset(): void {
     clearTx();
+    for (const tap of remotes.values()) dropTap(tap);
     remotes.clear();
     sleep();
     setLed('rxLed', '');

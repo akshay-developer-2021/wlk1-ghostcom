@@ -11,7 +11,7 @@
      the UI badge downgrades to "SRTP" so the claim stays honest.
    ═══════════════════════════════════════════════════════════════ */
 
-const WORKER_SRC = `
+export const WORKER_SRC = `
 let key = null, drops = 0, encCount = 0, decCount = 0;
 async function encrypt(frame) {
   const iv = crypto.getRandomValues(new Uint8Array(12));

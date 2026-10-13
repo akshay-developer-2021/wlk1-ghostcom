@@ -3,6 +3,10 @@
    Production fixes vs PoC:
    · Generation token per gesture: if the finger leaves before the
      async arm sequence completes, TX never latches (tap-race fix).
+   · abortArming: a release-during-arm tears down anything the stale
+     path armed (hot mic, mic-carrying sender) — no ghost mic.
+   · Holder refcount: pointer / Space / T-key / api holds share one TX;
+     releasing one never cuts another holder's TX.
    · Keyboard operable (Space / Enter hold) — desktop users exist.
    · TX safety cutoff (config.maxTxMs) — no infinite open squelch.
    · First-press "ARM" state surfaced on the LCD. */
@@ -25,19 +29,33 @@ export interface PttDeps {
   onAnalyser?: (stream: MediaStream) => void;
 }
 
+/** Concurrent TX owners. 'api' is the default for programmatic callers —
+    including the laptop T-key path in main.ts, which calls press() /
+    release() with no holder argument. */
+export type PttHolder = 'pointer' | 'space' | 't' | 'api';
+
 export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps) {
   const btn = req('ptt');
   let pressed = false;
+  const holders = new Set<string>();
   let token = 0;
   let txStart = 0;
   let cutoffTimer: ReturnType<typeof setTimeout> | null = null;
 
-  async function press(e?: PointerEvent): Promise<void> {
-    if (pressed) return;
+  /** Map a press/release argument to its holder: an explicit string wins,
+      a passed event means the pointer button, omitted means 'api'. */
+  const holderOf = (h?: string | Event): string =>
+    typeof h === 'string' ? h : (h ? 'pointer' : 'api');
+
+  async function press(holderOrEvent?: string | PointerEvent, e?: PointerEvent): Promise<void> {
+    const holder = holderOf(holderOrEvent);
+    const ev = typeof holderOrEvent === 'string' ? e : holderOrEvent;
+    holders.add(holder);
+    if (pressed) return;                       // another holder owns the gesture — refcount only
     pressed = true;
     const gen = ++token;
-    e?.preventDefault?.();
-    try { e?.pointerId != null && btn.setPointerCapture(e.pointerId); } catch { /* noop */ }
+    ev?.preventDefault?.();
+    try { ev?.pointerId != null && btn.setPointerCapture(ev.pointerId); } catch { /* noop */ }
     btn.classList.add('pressed');
     btn.setAttribute('aria-pressed', 'true');
     sfx.haptic(HAPTIC.ptt);
@@ -52,8 +70,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
       try {
         await mesh.join(state.channel || '22');
       } catch (err) {
-        btn.classList.remove('pressed');
-        pressed = false;
+        resetGesture();
         setSync('LINK FAILED — TRY AGAIN', 'warn');
         log(`JOIN FAIL — ${(err as Error)?.message ?? err}`, 'warn');
         toast('LINK FAILED — TRY AGAIN');
@@ -61,10 +78,9 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
         return;
       }
     }
-    if (gen !== token) return releasedEarly(gen);           // finger left during join
+    if (gen !== token) return abortArming(gen);           // finger left during join
     if (!state.joined) {
-      btn.classList.remove('pressed');
-      pressed = false;
+      resetGesture();
       setSync('NO LINK — TRY AGAIN', 'warn');
       sfx.pttClose();
       return;
@@ -73,7 +89,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
     setSync('ARMING TX — WAKING MIC…', 'warn');
     try {
       const { stream, track, generation } = await mic.acquire();
-      if (generation !== mic.generation || gen !== token) return releasedEarly(gen);
+      if (generation !== mic.generation || gen !== token) return abortArming(gen);
       if (!track) throw new Error('MIC BLOCKED — NO AUDIO TRACK');
       set({ micHot: true });
       setMicLed(true);
@@ -84,17 +100,17 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
         log(`ANALYSER HOOK FAIL — ${(err as Error)?.message ?? err}`, 'warn');
       }
       const report = await mesh.beginTx(track);
-      if (gen !== token) return releasedEarly(gen);
+      if (gen !== token) return abortArming(gen);
       if (report.attached === 0 && report.redialed === 0 && mesh.linked.length === 0) {
         log('TX SOLO — NO UNITS LINKED', 'warn');
       }
       beginTxUI();
       cutoffTimer = setTimeout(() => {                      // safety cutoff
-        if (pressed) { release(); toast('TX TIMEOUT — 5:00'); log('TX AUTO-CUTOFF', 'warn'); }
+        if (pressed) { forceRelease(); toast('TX TIMEOUT — 5:00'); log('TX AUTO-CUTOFF', 'warn'); }
       }, config.maxTxMs);
     } catch (err) {
-      btn.classList.remove('pressed');
-      pressed = false;
+      if (gen !== token) return abortArming(gen);   // cancelled mid-arm — teardown, no error UI
+      resetGesture();
       setSync('MIC BLOCKED — CHECK LOCK ICON', 'warn');
       log(`TX FAIL — ${(err as Error)?.message ?? err}`, 'warn');
       toast('⚠ ALLOW MIC ACCESS');
@@ -102,8 +118,29 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
     }
   }
 
-  function releasedEarly(gen: number): void {
-    if (gen === token) { release(); }
+  /** Release-during-arm: the gesture ended while join / mic-acquire /
+      beginTx was still in flight. The stale path may already have warmed
+      the mic or attached it to senders, so tear all of it down — never
+      leave a hot mic or a mic-carrying sender with no TX state.
+      When a newer gesture has since claimed the button (token moved past
+      this release) that gesture owns cleanup; do nothing. */
+  function abortArming(gen: number): void {
+    if (gen + 1 !== token) return;
+    try { mesh.endTx(); } catch { /* abort is best-effort — must not throw */ }
+    try { mic.mute(); } catch { /* abort is best-effort — must not throw */ }
+    set({ micHot: false });
+    setMicLed(false);
+    btn.classList.remove('pressed');
+    btn.setAttribute('aria-pressed', 'false');
+    pressed = false;
+  }
+
+  /** Full gesture reset with no TX teardown — the arm never completed. */
+  function resetGesture(): void {
+    holders.clear();
+    pressed = false;
+    btn.classList.remove('pressed');
+    btn.setAttribute('aria-pressed', 'false');
   }
 
   function beginTxUI(): void {
@@ -117,8 +154,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
     try { mesh.sendSpeaking(true); } catch { /* presence is best-effort */ }
   }
 
-  function release(): void {
-    if (!pressed) return;
+  function teardown(): void {
     pressed = false;
     token++;                              // invalidate any in-flight press path
     if (cutoffTimer != null) { clearTimeout(cutoffTimer); cutoffTimer = null; }
@@ -143,22 +179,62 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
     }
   }
 
+  function release(holderOrEvent?: string | Event): void {
+    holders.delete(holderOf(holderOrEvent));
+    if (holders.size > 0) return;          // another holder still owns TX — keep the air
+    if (!pressed) return;
+    teardown();
+  }
+
+  /** Drop every holder and tear down — blur, safety cutoff, mic death. */
+  function forceRelease(): void {
+    holders.clear();
+    if (!pressed) return;
+    teardown();
+  }
+
+  /* Sudden mic death mid-TX (device unplugged, OS revoke): never sit in
+     TX on a dead track — drop the air and tell the user to re-tap.
+     (Warm-expiry stops land here too, but state.tx is already false.) */
+  mic.onEnded(() => {
+    if (state.tx) {
+      toast('MIC LOST — RE-TAP');
+      log('MIC LOST MID-TX — DROPPED', 'warn');
+      forceRelease();
+    }
+  });
+
+  /* Locked screen with a warm mic: drop hardware now so the next press
+     takes a clean cold path instead of resuming an OS-revoked corpse. */
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && !state.tx && mic.warm) mic.release();
+  });
+
   /* pointer events */
-  btn.addEventListener('pointerdown', press);
-  ['pointerup', 'pointercancel'].forEach((ev) => btn.addEventListener(ev, release));
+  btn.addEventListener('pointerdown', (ev) => { void press('pointer', ev); });
+  for (const ev of ['pointerup', 'pointercancel'] as const) {
+    btn.addEventListener(ev, () => release('pointer'));
+  }
+  /* iOS gesture interrupt (swipe / notification pull-down) can kill
+     pointer capture with no pointerup — without this TX latches open. */
+  btn.addEventListener('lostpointercapture', () => release('pointer'));
   btn.addEventListener('contextmenu', (e) => e.preventDefault());
 
   /* keyboard: hold Space or Enter while the button itself is focused */
   btn.addEventListener('keydown', (e) => {
-    if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) { e.preventDefault(); press(); }
+    if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
+      e.preventDefault();
+      void press(e.key === 'Enter' ? 'api' : 'space');
+    }
   });
   btn.addEventListener('keyup', (e) => {
-    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); release(); }
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); release(e.key === 'Enter' ? 'api' : 'space'); }
   });
 
   /* GLOBAL shortcut: hold SPACE anywhere = push to talk.
      Guards: no auto-repeat, skip while hint dialog is open,
-     skip text-entry targets, and release on window blur so a
+     skip text-entry targets, native slider keys win while the volume
+     slider is focused, and force-release on window blur so a
      held TX can never latch when the window loses focus. */
   const inTextField = (t: EventTarget | null): boolean =>
     !!t && typeof (t as Element).closest === 'function'
@@ -167,16 +243,17 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps
     if (e.code !== 'Space' && e.key !== ' ') return;
     if (e.repeat) return;
     if (inTextField(e.target)) return;
+    if (document.activeElement?.id === 'volSlider') return;   // native slider keys win
     if (document.getElementById('hint')?.classList.contains('show')) return;
     e.preventDefault();                       // also stops focused-button click + scroll
-    press();
+    void press('space');
   });
   window.addEventListener('keyup', (e) => {
     if (e.code !== 'Space' && e.key !== ' ') return;
     e.preventDefault();
-    release();
+    release('space');
   });
-  window.addEventListener('blur', () => release());
+  window.addEventListener('blur', () => forceRelease());
 
   return { press, release, get isPressed() { return pressed; } };
 }

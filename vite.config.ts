@@ -10,6 +10,11 @@ export default mergeConfig(
       sourcemap: false,
       chunkSizeWarningLimit: 60,
       reportCompressedSize: true,
+      // Explicit Vite default (4 KiB): imported assets smaller than this
+      // inline as data-URLs. Pinned so a Vite upgrade can't silently
+      // base64-bloat the bundle. public/ icons bypass this (copied
+      // verbatim) and fonts (~9–24 KiB each) always emit as files.
+      assetsInlineLimit: 4096,
       rollupOptions: {
         output: {
           manualChunks: { peerjs: ['peerjs'] },
@@ -38,6 +43,10 @@ export default mergeConfig(
         filename: 'sw.ts',
         // main.ts registers the SW manually; don't auto-inject a duplicate.
         injectRegister: false,
+        // Precache fonts/icons/manifest too (defaults cover only js/css/html).
+        injectManifest: {
+          globPatterns: ['**/*.{js,css,html,woff,woff2,svg,webmanifest}'],
+        },
       }),
       // Bundle visualizer — dev-only, only when ANALYZE=1 (`npm run analyze`).
       ...(process.env.ANALYZE
