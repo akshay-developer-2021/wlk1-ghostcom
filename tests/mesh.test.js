@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('peerjs', () => ({ Peer: class { destroy() {} on() {} } }));
 vi.mock('../src/audio/silentTrack.js', () => ({
   silentStream: () => 'SILENT_TRACK',
-  getSilentTrack: () => ({}),
+  getSilentTrack: () => 'SILENT_TRACK',
 }));
 
 import { Mesh, onCrypto } from '../src/webrtc/mesh.js';

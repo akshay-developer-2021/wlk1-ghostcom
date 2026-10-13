@@ -1,4 +1,4 @@
-/* ui/loop.js — consolidated render loop with VAD-gated pacing.
+/* ui/loop.ts — consolidated render loop with VAD-gated pacing.
 
    PoC problem: rAF @15fps ran forever while any peer was linked,
    even on a silent channel. Production behavior:
@@ -10,64 +10,89 @@
    DOM writes are change-detected; chip refs are cached. */
 
 import { state, on } from '../core/state.js';
+import type { PeerInfo } from '../core/state.js';
 import { setLed, setSync } from './dom.js';
-import { $ } from './dom.js';
+
+/** Minimal structural surface the loop needs from the sfx module. */
+export interface LoopSfx {
+  haptic?: (n: number | number[]) => void;
+}
+
+export interface LoopOptions {
+  sfx: LoopSfx;
+  onSuspend?: () => void;
+}
+
+export interface RenderLoop {
+  registerTx: (analyser: AnalyserNode | null) => void;
+  clearTx: () => void;
+  registerRemote: (slot: number, analyser: AnalyserNode) => void;
+  unregisterRemote: (slot: number) => void;
+  reset: () => void;
+  kick: () => void;
+}
+
+interface RemoteTap {
+  an: AnalyserNode;
+  data: Uint8Array<ArrayBuffer>;
+}
 
 const IDLE_MS = 3000;
-const BARS = () => document.querySelectorAll('.vb');
+const BARS = (): NodeListOf<HTMLElement> => document.querySelectorAll<HTMLElement>('.vb');
 
-export function createLoop({ sfx, onSuspend }) {
-  let txAnalyser = null;
-  let txData = null;
-  const remotes = new Map();              // slot -> {an, data}
-  const chipCache = new Map();            // slot -> element
+export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
+  let txAnalyser: AnalyserNode | null = null;
+  let txData: Uint8Array<ArrayBuffer> | null = null;
+  const remotes = new Map<number, RemoteTap>();   // slot -> {an, data}
+  const chipCache = new Map<number, Element | null>(); // slot -> element
   let rafOn = false, lastFrame = 0, lastActivity = 0;
-  let idleTimer = null;
+  let idleTimer: ReturnType<typeof setInterval> | null = null;
 
-  on('peers', (peers) => {
+  on('peers', (v: unknown) => {
+    if (!(v instanceof Map)) return;
     /* cache chip elements; rebuild only when membership changes */
     chipCache.clear();
-    for (const [slot] of peers) {
+    for (const slot of (v as Map<number, PeerInfo>).keys()) {
       chipCache.set(slot, document.querySelector(`.chip[data-slot="${slot}"]`));
     }
   });
 
-  function registerTx(analyser) {
+  function registerTx(analyser: AnalyserNode | null): void {
     txAnalyser = analyser;
     txData = analyser ? new Uint8Array(analyser.frequencyBinCount) : null;
     BARS().forEach((b) => b.classList.add('live'));
     kick();
   }
-  function clearTx() {
+  function clearTx(): void {
     txAnalyser = null; txData = null;
     BARS().forEach((b) => { b.style.height = '4px'; b.classList.remove('live'); });
   }
-  function registerRemote(slot, analyser) {
+  function registerRemote(slot: number, analyser: AnalyserNode): void {
     remotes.set(slot, { an: analyser, data: new Uint8Array(analyser.frequencyBinCount) });
     kick();
   }
-  function unregisterRemote(slot) { remotes.delete(slot); }
-  function reset() {
+  function unregisterRemote(slot: number): void { remotes.delete(slot); }
+  function reset(): void {
     clearTx();
     remotes.clear();
     sleep();
     setLed('rxLed', '');
   }
 
-  function kick() {
+  function kick(): void {
     lastActivity = performance.now();
     if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
     if (!rafOn && !document.hidden) { rafOn = true; requestAnimationFrame(frame); }
   }
 
-  function idle() {
+  function idle(): void {
     if (rafOn) { rafOn = false; }
     if (!idleTimer && remotes.size + (txAnalyser ? 1 : 0) > 0 && !document.hidden) {
       idleTimer = setInterval(pollIdle, 500);          // 2Hz standby pulse
     }
   }
 
-  function sleep() {
+  function sleep(): void {
     rafOn = false;
     if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
     BARS().forEach((b) => { b.style.height = '4px'; });
@@ -75,24 +100,24 @@ export function createLoop({ sfx, onSuspend }) {
     onSuspend?.();                                     // AudioContext → suspended
   }
 
-  function pollIdle() {
+  function pollIdle(): void {
     if (document.hidden) return;
-    if (txAnalyser && hasEnergy(txAnalyser, txData)) { kick(); return; }
+    if (txAnalyser && txData && hasEnergy(txAnalyser, txData)) { kick(); return; }
     for (const [, o] of remotes) {
-      if (hasEnergy(o.an, o.data)) { kick(); sfx.haptic?.(6); return; }
+      if (hasEnergy(o.an, o.data)) { kick(); try { sfx.haptic?.(6); } catch { /* noop */ } return; }
     }
     if (performance.now() - lastActivity > 120_000 && remotes.size === 0) sleep();
   }
 
-  function hasEnergy(an, data) {
-    if (!an) return false;
+  function hasEnergy(an: AnalyserNode | null, data: Uint8Array<ArrayBuffer> | null): boolean {
+    if (!an || !data) return false;
     an.getByteFrequencyData(data);
     let s = 0;
-    for (let i = 0; i < data.length; i++) s += data[i];
+    for (let i = 0; i < data.length; i++) s += data[i] ?? 0;
     return s / data.length > 14;
   }
 
-  function frame(ts) {
+  function frame(ts: number): void {
     if (document.hidden) { idle(); return; }
     const active = txAnalyser || remotes.size > 0;
     if (!active) { sleep(); return; }
@@ -101,26 +126,32 @@ export function createLoop({ sfx, onSuspend }) {
       lastFrame = ts;
       let anySpeech = false;
 
-      if (txAnalyser) {
+      if (txAnalyser && txData) {
         txAnalyser.getByteFrequencyData(txData);
+        const bins = txData;
         BARS().forEach((b, i) => {
-          const v = txData[Math.min(i * 2 + 1, txData.length - 1)] / 255;
+          const v = (bins[Math.min(i * 2 + 1, bins.length - 1)] ?? 0) / 255;
           const h = Math.max(4, 4 + v * 22);
-          if (b.__h !== h) { b.style.height = `${h}px`; b.__h = h; }   // write on change
+          if ((b as HTMLElement & { __h?: number }).__h !== h) {
+            b.style.height = `${h}px`;
+            (b as HTMLElement & { __h?: number }).__h = h;
+          }   // write on change
         });
         if (hasEnergy(txAnalyser, txData)) anySpeech = true;
       }
 
       for (const [slot, o] of remotes) {
         const talk = hasEnergy(o.an, o.data);
-        const chip = chipCache.get(slot) || document.querySelector(`.chip[data-slot="${slot}"]`);
+        const chip = chipCache.get(slot) ?? document.querySelector(`.chip[data-slot="${slot}"]`);
         if (chip) chip.classList.toggle('speaking', talk);
         if (talk) anySpeech = true;
       }
 
       setLed('rxLed', anySpeech ? 'tx' : '');
       if (anySpeech) { lastActivity = ts; setSync('▼ RX ← UNIT SPEAKING', 'on'); }
-      else if (state.tx) setSync(`▲ TX → CH ${state.channel} • SQUELCH OPEN`, 'tx');
+      else if (state.tx && typeof state.channel === 'string') {
+        setSync(`▲ TX → CH ${state.channel} • SQUELCH OPEN`, 'tx');
+      }
       if (performance.now() - lastActivity > IDLE_MS) idle();
     }
     if (rafOn) requestAnimationFrame(frame);

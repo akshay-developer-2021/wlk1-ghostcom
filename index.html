@@ -18,13 +18,14 @@
 <div class="shell" id="shell">
   <div class="notch" aria-hidden="true"></div>
   <div class="screen">
-    <div class="radio">
+    <div class="radio" id="view-radio">
       <div class="col col-left">
         <div class="top-bar">
           <div>
             <div class="model"><b>WLK-1 ▮ GHOSTCOM</b><span class="sub">E2E ENCRYPTED · P2P MESH · NO SERVER</span></div>
           </div>
           <div class="antenna" id="antenna" aria-label="Antenna"></div>
+          <button class="gear" id="keySettings" aria-label="Settings">⚙</button>
           <div class="vol-wrap">
             <div class="vol-head"><span class="vol-label">VOL</span><span class="vol-val" id="volVal">80</span></div>
             <input class="vol-slider" id="volSlider" type="range" min="0" max="100" value="80" step="1" aria-label="Volume" />
@@ -92,6 +93,66 @@
       </div>
     </div>
 
+    <section class="panel-view join hidden" id="view-join" aria-label="Join a channel">
+      <div class="panel-head">
+        <div class="model"><b>WLK-1 ▮ GHOSTCOM</b><span class="sub">JOIN A NET — NO AUTO-JOIN INTO DEAD ROOMS</span></div>
+      </div>
+      <label class="field">
+        <span class="field-label">CHANNEL · 2 DIGITS</span>
+        <input class="field-input chan-input" id="joinChannel" inputmode="numeric" pattern="[0-9]*"
+               maxlength="2" placeholder="22" autocomplete="off" aria-label="Channel, two digits" />
+      </label>
+      <div class="tabs" role="tablist" aria-label="Join mode">
+        <button class="tab active" id="tabLink" role="tab" aria-selected="true">LINK AUTO</button>
+        <button class="tab" id="tabPass" role="tab" aria-selected="false">PASSPHRASE</button>
+      </div>
+      <div class="tab-panel" id="panelLink">
+        <div class="note">FRESH RANDOM KEY PER JOIN. SHARE IT WITH 📡 SHARE ONCE INSIDE.</div>
+      </div>
+      <div class="tab-panel hidden" id="panelPass">
+        <label class="field">
+          <span class="field-label">PASSPHRASE · CASE-SENSITIVE</span>
+          <input class="field-input" id="joinPass" type="password" autocomplete="off"
+                 autocapitalize="off" spellcheck="false" placeholder="correct horse battery staple"
+                 aria-label="Passphrase" />
+        </label>
+        <div class="meter" aria-hidden="true"><div class="meter-fill" id="passFill"></div></div>
+        <div class="meter-row"><span>STRENGTH</span><span id="passLabel">—</span></div>
+        <label class="remember"><input type="checkbox" id="rememberMe" /> REMEMBER KEY ON THIS DEVICE</label>
+        <div class="note">KEY = ARGON2ID(PASSPHRASE, SALT "wlk1-v1-CH⌀") · WORDS NEVER LEAVE SESSION STORAGE</div>
+      </div>
+      <div class="join-err" id="joinErr" role="alert"></div>
+      <button class="go big-go" id="joinBtn">▶ JOIN CHANNEL</button>
+      <div class="recent-head">[ RECENT ROOMS ]</div>
+      <div class="recent-list" id="recentList"></div>
+      <button class="linklike" id="joinSettings">⚙ SIGNALING / SETTINGS</button>
+    </section>
+
+    <section class="panel-view settings hidden" id="view-settings" aria-label="Settings">
+      <div class="panel-head">
+        <div class="model"><b>WLK-1 ▮ SETTINGS</b><span class="sub">BROKER · TURN · DIAGNOSTICS · IDENTITY</span></div>
+      </div>
+      <label class="field">
+        <span class="field-label">SIGNALING HOST (BLANK = DEFAULT CLOUD)</span>
+        <input class="field-input" id="setHost" type="text" autocomplete="off" autocapitalize="off"
+               spellcheck="false" placeholder="broker.example.com" aria-label="Signaling host" />
+      </label>
+      <div class="btn-row">
+        <button class="go" id="setSave">SAVE</button>
+        <button class="go ghost" id="setReload">RELOAD</button>
+      </div>
+      <div class="note" id="turnNote">ACTIVE ICE: —</div>
+      <div class="diag">
+        <div class="diag-row"><span>CRYPTO</span><b id="diagE2ee">—</b></div>
+        <div class="diag-row"><span>BROWSER</span><b id="diagBrowser">—</b></div>
+      </div>
+      <div class="btn-row">
+        <button class="go ghost" id="setCopyLogs">COPY LOGS</button>
+        <button class="go danger" id="newIdentityBtn">NEW IDENTITY</button>
+      </div>
+      <button class="linklike" id="setBack">← BACK TO RADIO</button>
+    </section>
+
     <div class="toast" id="toast" role="status"></div>
     <div class="hint" id="hint" role="dialog" aria-label="How to use">
       <div class="step"><b>01</b> · TAP 📡 SHARE — SEND THE LINK TO YOUR TEAM</div>
@@ -106,6 +167,6 @@
   <div class="home-bar" aria-hidden="true"></div>
 </div>
 
-<script type="module" src="/src/main.js"></script>
+<script type="module" src="/src/main.ts"></script>
 </body>
 </html>

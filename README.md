@@ -14,10 +14,17 @@ transmitting.
 ```bash
 npm install
 npm run dev        # http://localhost:5173 (mic needs localhost or HTTPS)
-npm test           # vitest unit suite
+npm test           # vitest unit suite (31 tests)
+npm run typecheck  # tsc --noEmit (strict)
 npm run build      # production bundle → dist/
-npm run preview    # serve dist/
+npm run preview    # serve dist/ (e2e webServer target)
+npm run test:e2e   # playwright matrix, needs: npx playwright install --with-deps chromium firefox webkit
 ```
+
+Join a room two ways: open a share link (`#CH.SECRET`), or pick a
+channel + passphrase on the Join screen — both sides derive the same
+room secret locally (argon2id via `hash-wasm`, PBKDF2 fallback), so no
+link needs to be sent. See `PLAN.md` for the rebuild roadmap.
 
 Deploy `dist/` to **any static host with HTTPS** (Cloudflare Pages,
 Netlify, GitHub Pages+proxy, etc.). No server-side code required.

@@ -94,7 +94,8 @@ app JS ≤ 60 kB · peerjs chunk ≤ 30 kB · fonts ≤ 60 kB · total initial �
   `@fontsource` pulls (vietnamese/greek/cyrillic shipped for a VT323 LCD).
   Switch to subset imports (`latin-400.css`-style entries), verify with build.
 - **Dynamic KDF:** argon2 WASM loads only inside the passphrase flow.
-- **Build:** `target: 'baseline-widely-available'`, `sourcemap: false`
+- **Build:** `target: 'es2022'` (Vite 6's esbuild predates the
+  `baseline-widely-available` label — same modern profile), `sourcemap: false`
   (maps currently ship to Surge — dead weight + source exposure),
   keep `manualChunks: { peerjs }`, `chunkSizeWarningLimit: 60`.
 - **Tree-shaking:** named ESM imports everywhere; no side-effect adapter

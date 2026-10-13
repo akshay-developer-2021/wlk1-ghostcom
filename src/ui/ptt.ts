@@ -1,4 +1,4 @@
-/* ui/ptt.js — the push-to-talk controller.
+/* ui/ptt.ts — the push-to-talk controller.
 
    Production fixes vs PoC:
    · Generation token per gesture: if the finger leaves before the
@@ -8,17 +8,31 @@
    · First-press "ARM" state surfaced on the LCD. */
 
 import { set, state } from '../core/state.js';
-import { setSync, setLed, setMicLed, log, toast, countPkt } from './dom.js';
+import { setSync, setLed, setMicLed, log, toast, countPkt, req } from './dom.js';
 import { HAPTIC } from '../audio/sfx.js';
+import type { Mesh } from '../webrtc/mesh.js';
+import type { MicManager } from '../audio/mic.js';
+import type { Sfx } from '../audio/sfx.js';
+import type { PowerManager } from '../core/battery.js';
+import type { AppConfig } from '../config.js';
 
-export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }) {
-  const btn = document.getElementById('ptt');
+export interface PttDeps {
+  mesh: Mesh;
+  mic: MicManager;
+  sfx: Sfx;
+  power: PowerManager;
+  config: AppConfig;
+  onAnalyser?: (stream: MediaStream) => void;
+}
+
+export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }: PttDeps) {
+  const btn = req('ptt');
   let pressed = false;
   let token = 0;
   let txStart = 0;
-  let cutoffTimer = null;
+  let cutoffTimer: ReturnType<typeof setTimeout> | null = null;
 
-  async function press(e) {
+  async function press(e?: PointerEvent): Promise<void> {
     if (pressed) return;
     pressed = true;
     const gen = ++token;
@@ -32,7 +46,21 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }) {
     if (!mesh.peer || !state.joined) {
       setSync('LINKING — JOIN CHANNEL FIRST…', 'warn');
     }
-    if (!mesh.peer) await mesh.join(state.channel || '22');
+    if (!mesh.peer) {
+      /* a join throw (WebCrypto down, broker fatal) must reset the
+         button, never escape as an unhandled rejection */
+      try {
+        await mesh.join(state.channel || '22');
+      } catch (err) {
+        btn.classList.remove('pressed');
+        pressed = false;
+        setSync('LINK FAILED — TRY AGAIN', 'warn');
+        log(`JOIN FAIL — ${(err as Error)?.message ?? err}`, 'warn');
+        toast('LINK FAILED — TRY AGAIN');
+        sfx.pttClose();
+        return;
+      }
+    }
     if (gen !== token) return releasedEarly(gen);           // finger left during join
     if (!state.joined) {
       btn.classList.remove('pressed');
@@ -46,9 +74,15 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }) {
     try {
       const { stream, track, generation } = await mic.acquire();
       if (generation !== mic.generation || gen !== token) return releasedEarly(gen);
+      if (!track) throw new Error('MIC BLOCKED — NO AUDIO TRACK');
       set({ micHot: true });
       setMicLed(true);
-      onAnalyser?.(stream);
+      /* analyser is observability only — its throw must never abort TX */
+      try {
+        onAnalyser?.(stream);
+      } catch (err) {
+        log(`ANALYSER HOOK FAIL — ${(err as Error)?.message ?? err}`, 'warn');
+      }
       const report = await mesh.beginTx(track);
       if (gen !== token) return releasedEarly(gen);
       if (report.attached === 0 && report.redialed === 0 && mesh.linked.length === 0) {
@@ -62,17 +96,17 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }) {
       btn.classList.remove('pressed');
       pressed = false;
       setSync('MIC BLOCKED — CHECK LOCK ICON', 'warn');
-      log(`TX FAIL — ${err.message}`, 'warn');
+      log(`TX FAIL — ${(err as Error)?.message ?? err}`, 'warn');
       toast('⚠ ALLOW MIC ACCESS');
       sfx.haptic(HAPTIC.warn);
     }
   }
 
-  function releasedEarly(gen) {
+  function releasedEarly(gen: number): void {
     if (gen === token) { release(); }
   }
 
-  function beginTxUI() {
+  function beginTxUI(): void {
     txStart = Date.now();
     set({ tx: true });
     setLed('txLed', 'tx');
@@ -82,11 +116,11 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }) {
     power.holdWake();
   }
 
-  function release() {
+  function release(): void {
     if (!pressed) return;
     pressed = false;
     token++;                              // invalidate any in-flight press path
-    clearTimeout(cutoffTimer);
+    if (cutoffTimer != null) { clearTimeout(cutoffTimer); cutoffTimer = null; }
     btn.classList.remove('pressed');
     btn.setAttribute('aria-pressed', 'false');
     if (state.tx) {
@@ -124,7 +158,9 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser }) {
      Guards: no auto-repeat, skip while hint dialog is open,
      skip text-entry targets, and release on window blur so a
      held TX can never latch when the window loses focus. */
-  const inTextField = (t) => !!(t && t.closest && t.closest('input, textarea, select, [contenteditable="true"]'));
+  const inTextField = (t: EventTarget | null): boolean =>
+    !!t && typeof (t as Element).closest === 'function'
+    && (t as Element).closest('input, textarea, select, [contenteditable="true"]') != null;
   window.addEventListener('keydown', (e) => {
     if (e.code !== 'Space' && e.key !== ' ') return;
     if (e.repeat) return;

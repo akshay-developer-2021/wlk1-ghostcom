@@ -1,11 +1,40 @@
-/* core/battery.js — power lifecycle: Battery API, power-save mode,
+/* core/battery.ts — power lifecycle: Battery API, power-save mode,
    visibility, and a small scheduler that pauses everything when the
    tab is hidden or the screen is off. */
 
 import { on, set, state } from './state.js';
 
+type LogFn = (msg: string, kind?: string) => void;
+
+/** Minimal BatteryManager surface (lib.dom lacks getBattery typing). */
+export interface BatteryLike {
+  level: number;
+  charging: boolean;
+  addEventListener(type: string, cb: () => void): void;
+}
+
+export interface WakeLockSentinelLike {
+  release(): Promise<void>;
+}
+
+export type NavigatorLike = Navigator & {
+  getBattery?: () => Promise<BatteryLike | undefined | null>;
+};
+
+export interface PowerManagerOptions {
+  documentRef?: Document;
+  navigatorRef?: NavigatorLike;
+  log?: LogFn;
+}
+
 export class PowerManager {
-  constructor({ documentRef = document, navigatorRef = navigator, log = () => {} } = {}) {
+  private doc: Document;
+  private nav: NavigatorLike;
+  private _log: LogFn;
+  private _intervalTimers: Set<ReturnType<typeof setInterval>>;   // timers that must respect hidden state
+  private _wakeLock: WakeLockSentinelLike | null;
+
+  constructor({ documentRef = document, navigatorRef = navigator, log = () => {} }: PowerManagerOptions = {}) {
     this.doc = documentRef;
     this.nav = navigatorRef;
     this._log = log;
@@ -13,13 +42,13 @@ export class PowerManager {
     this._wakeLock = null;
   }
 
-  init() {
+  init(): void {
     /* battery + power-save. getBattery doesn't exist on Firefox/Safari —
        plain ?.() chaining would throw on .then and kill this module. */
     try {
       Promise.resolve(this.nav.getBattery?.()).then((b) => {
         if (!b || typeof b.addEventListener !== 'function') return;
-        const upd = () => {
+        const upd = (): void => {
           const pct = Math.round(b.level * 100);
           const save = !b.charging && b.level < 0.2;
           set({ powerSave: save });
@@ -47,37 +76,38 @@ export class PowerManager {
   }
 
   /** setInterval replacement: callback skipped while hidden (never cleared). */
-  intervalWhenVisible(fn, ms) {
+  intervalWhenVisible(fn: () => void, ms: number): ReturnType<typeof setInterval> {
     const t = setInterval(() => { if (!this.doc.hidden) fn(); }, ms);
     this._intervalTimers.add(t);
     return t;
   }
 
   /** Wake lock held ONLY while transmitting. */
-  async holdWake() {
+  async holdWake(): Promise<WakeLockSentinelLike | null> {
     try {
-      this._wakeLock = await this.nav.wakeLock?.request('screen') || null;
+      this._wakeLock = await this.nav.wakeLock?.request('screen') ?? null;
     } catch { /* unsupported / denied — fine */ }
     return this._wakeLock;
   }
-  async dropWake() {
+  async dropWake(): Promise<void> {
     try { await this._wakeLock?.release(); } catch { /* noop */ }
     this._wakeLock = null;
   }
 }
 
-const visibilityListeners = new Set();
-export function onVisibilityChange(fn) { visibilityListeners.add(fn); }
-function emitVisibility(doc) { for (const fn of visibilityListeners) fn(!doc.hidden); }
+type VisibilityListener = (visible: boolean) => void;
+const visibilityListeners = new Set<VisibilityListener>();
+export function onVisibilityChange(fn: VisibilityListener): void { visibilityListeners.add(fn); }
+function emitVisibility(doc: Document): void { for (const fn of visibilityListeners) fn(!doc.hidden); }
 
 /* ---- VAD-gated render pacing helper ------------------------------
    Callers ask for a frame budget instead of running rAF blindly. */
-export function frameBudgetMs(powerSave, active) {
+export function frameBudgetMs(powerSave: boolean, active: boolean): number {
   if (!active) return Infinity;        // loop should sleep entirely
   return powerSave ? 200 : 66;         // 5fps / 15fps
 }
 
 /* Shared idle-state helper used by mesh (leg teardown) and ui loop. */
-export function isHidden() { return typeof document !== 'undefined' && document.hidden; }
+export function isHidden(): boolean { return typeof document !== 'undefined' && document.hidden; }
 
 export { on, state };

@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   audio/mic.js — cold-mic policy with a WARM WINDOW.
+   audio/mic.ts — cold-mic policy with a WARM WINDOW.
 
    · Hardware OFF by default. getUserMedia only on TX press.
    · After TX release the track is muted (enabled=false) and kept
@@ -13,20 +13,52 @@
 
 export const WARM_WINDOW_MS = 45_000;
 
-const defaultGum = async (constraints) => {
+export type GetUserMediaFn = (constraints: MediaStreamConstraints) => Promise<MediaStream>;
+export type TimerHandle = ReturnType<typeof setTimeout>;
+
+const defaultGum: GetUserMediaFn = async (constraints) => {
   const md = globalThis.navigator?.mediaDevices;
   if (!md) throw new Error('NO MEDIA API — USE HTTPS');
   return md.getUserMedia(constraints);
 };
 
+export interface MicManagerOptions {
+  getUserMedia?: GetUserMediaFn;
+  warmWindowMs?: number;
+  setTimeoutFn?: (fn: () => void, ms: number) => TimerHandle;
+  clearTimeoutFn?: (t: TimerHandle) => void;
+  log?: (msg: string, kind?: string) => void;
+}
+
+export interface MicAcquisition {
+  stream: MediaStream;
+  track: MediaStreamTrack | undefined;
+  generation: number;
+}
+
+export type EndedHandler = () => void;
+
 export class MicManager {
+  stream: MediaStream | null;
+  hot = false;          // hardware capturing AND enabled
+  warm = false;         // hardware alive but muted (warm window)
+
+  private _gum: GetUserMediaFn;
+  private _warmMs: number;
+  private _setTimeout: (fn: () => void, ms: number) => TimerHandle;
+  private _clearTimeout: (t: TimerHandle) => void;
+  private _log: (msg: string, kind?: string) => void;
+  private _warmTimer: TimerHandle | null;
+  private _gen: number;             // generation token — invalidates stale async paths
+  private _endedHandlers: Set<EndedHandler>;
+
   constructor({
     getUserMedia = defaultGum,
     warmWindowMs = WARM_WINDOW_MS,
     setTimeoutFn = (fn, ms) => setTimeout(fn, ms),
     clearTimeoutFn = (t) => clearTimeout(t),
     log = () => {},
-  } = {}) {
+  }: MicManagerOptions = {}) {
     this._gum = getUserMedia;
     this._warmMs = warmWindowMs;
     this._setTimeout = setTimeoutFn;
@@ -40,7 +72,20 @@ export class MicManager {
     this._endedHandlers = new Set();
   }
 
-  onEnded(fn) { this._endedHandlers.add(fn); }
+  onEnded(fn: EndedHandler): void { this._endedHandlers.add(fn); }
+
+  /** A cached stream is reusable only while it holds live audio tracks.
+      Test doubles without readyState count as live; 'ended' never does. */
+  private _liveAudioTracks(s: MediaStream | null): MediaStreamTrack[] | null {
+    if (!s) return null;
+    const tracks = s.getAudioTracks();
+    if (!tracks.length) return null;
+    const isLive = (t: MediaStreamTrack): boolean => {
+      const rs: unknown = (t as unknown as { readyState?: unknown }).readyState;
+      return rs === undefined || rs === 'live';
+    };
+    return tracks.every(isLive) ? tracks : null;
+  }
 
   /**
    * Acquire the mic. Resolves {stream, track, generation}.
@@ -48,33 +93,45 @@ export class MicManager {
    *   const {generation} = await mic.acquire();
    *   if (generation !== mic.generation) return; // gesture was cancelled
    */
-  async acquire() {
-    const gen = ++this._gen;
+  async acquire(): Promise<MicAcquisition> {
+    let gen: number = ++this._gen;
     if (this.warm && this.stream) {
-      this._clearTimeout(this._warmTimer);
-      this._warmTimer = null;
-      this.stream.getAudioTracks().forEach((t) => { t.enabled = true; });
-      this.warm = false;
-      this.hot = true;
-      this._log('MIC WARM-RESUME — 0ms WAKE', 'sys');
-      return { stream: this.stream, track: this.stream.getAudioTracks()[0], generation: gen };
+      const live = this._liveAudioTracks(this.stream);
+      if (!live) {
+        this.release();            // corpse (OS revoked / device lost) — fall to cold path
+        gen = this._gen;
+      } else {
+        if (this._warmTimer != null) this._clearTimeout(this._warmTimer);
+        this._warmTimer = null;
+        live.forEach((t) => { t.enabled = true; });
+        this.warm = false;
+        this.hot = true;
+        this._log('MIC WARM-RESUME — 0ms WAKE', 'sys');
+        return { stream: this.stream, track: live[0], generation: gen };
+      }
     }
     if (this.hot && this.stream) {
-      return { stream: this.stream, track: this.stream.getAudioTracks()[0], generation: gen };
+      const live = this._liveAudioTracks(this.stream);
+      if (!live) {
+        this.release();            // corpse — fall through to cold getUserMedia
+        gen = this._gen;
+      } else {
+        return { stream: this.stream, track: live[0], generation: gen };
+      }
     }
     /* Cross-browser constraints: echoCancellation is widely supported;
        noiseSuppression / autoGainControl are ideal-only so Safari and
        Firefox fall back instead of throwing OverconstrainedError. */
-    const tries = [
+    const tries: MediaStreamConstraints[] = [
       { audio: { echoCancellation: true, noiseSuppression: { ideal: true }, autoGainControl: { ideal: true } }, video: false },
       { audio: { echoCancellation: true }, video: false },
       { audio: true, video: false },
     ];
-    let stream = null, lastErr = null;
+    let stream: MediaStream | null = null, lastErr: unknown = null;
     for (const c of tries) {
       try { stream = await this._gum(c); break; } catch (e) { lastErr = e; }
     }
-    if (!stream) throw lastErr || new Error('MIC BLOCKED');
+    if (!stream) throw (lastErr ?? new Error('MIC BLOCKED')) as Error;
     if (gen !== this._gen) {                       // cancelled while awaiting HW
       stream.getTracks().forEach((t) => t.stop());
       throw new Error('MIC ACQUIRE CANCELLED');
@@ -83,7 +140,7 @@ export class MicManager {
     this.hot = true;
     this.warm = false;
     for (const t of stream.getAudioTracks()) {
-      t.addEventListener?.('ended', () => {
+      (t as MediaStreamTrack & { addEventListener?: MediaStreamTrack['addEventListener'] }).addEventListener?.('ended', () => {
         if (this.stream === stream) this._hardReset();
         for (const fn of this._endedHandlers) fn();
       });
@@ -93,12 +150,12 @@ export class MicManager {
   }
 
   /** TX released → mute + start warm window (hardware stays alive briefly). */
-  mute() {
+  mute(): void {
     if (!this.stream) return;
     this.hot = false;
     this.warm = true;
     this.stream.getAudioTracks().forEach((t) => { t.enabled = false; });
-    this._clearTimeout(this._warmTimer);
+    if (this._warmTimer != null) this._clearTimeout(this._warmTimer);
     if (this._warmMs > 0) {
       this._warmTimer = this._setTimeout(() => this.release(), this._warmMs);
     } else {
@@ -111,9 +168,9 @@ export class MicManager {
       Always bumps the generation token so an in-flight acquire
       (started by a PTT press that was already released) is
       invalidated and its stream destroyed on arrival. */
-  release() {
+  release(): void {
     ++this._gen;
-    this._clearTimeout(this._warmTimer);
+    if (this._warmTimer != null) this._clearTimeout(this._warmTimer);
     this._warmTimer = null;
     if (!this.stream) return;
     try { this.stream.getTracks().forEach((t) => t.stop()); } catch { /* noop */ }
@@ -124,14 +181,14 @@ export class MicManager {
   }
 
   /** Generation token — compare against acquire() results to abort stale work. */
-  get generation() { return this._gen; }
+  get generation(): number { return this._gen; }
 
-  _hardReset() {
+  _hardReset(): void {
     this.stream = null;
     this.hot = false;
     this.warm = false;
     ++this._gen;
-    this._clearTimeout(this._warmTimer);
+    if (this._warmTimer != null) this._clearTimeout(this._warmTimer);
     this._warmTimer = null;
   }
 }

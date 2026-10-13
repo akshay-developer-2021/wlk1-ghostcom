@@ -9,7 +9,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test",
+    "analyze": "ANALYZE=1 vite build"
   },
   "dependencies": {
     "peerjs": "^1.5.4"
@@ -17,7 +20,13 @@
   "devDependencies": {
     "@fontsource/inter": "^5.1.0",
     "@fontsource/vt323": "^5.1.0",
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^26.6.5",
+    "hash-wasm": "^4.12.0",
+    "rollup-plugin-visualizer": "^7.1.1",
+    "typescript": "^7.0.2",
     "vite": "^6.0.0",
+    "vite-plugin-pwa": "^2.0.0",
     "vitest": "^3.0.0"
   }
 }
