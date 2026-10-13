@@ -993,6 +993,17 @@ document.addEventListener('visibilitychange', () => {
 });
 bootSequence(['MEM OK', `CRYPTO ${E2EE.supported() ? 'E2EE-READY' : 'SRTP'}`, 'MIC COLD']);
 matrixRain();
+/* Hold the shell invisible until display fonts arrive — kills the
+   fallback-font swap flash on cold load. Preloads make this ~1 RTT;
+   the timeout force-reveals if fonts fail (offline/system fonts). */
+const docFonts = (document as unknown as { fonts?: FontFaceSet }).fonts;
+if (docFonts?.ready) {
+  const show = (): void => { document.body.classList.add('fonts-ready'); };
+  docFonts.ready.then(show, show);
+  setTimeout(show, 1500);
+} else {
+  document.body.classList.add('fonts-ready');
+}
 log(`WLK-1 INIT — GHOSTCOM ONLINE — ${E2EE.supported() ? 'E2EE SUPPORTED' : 'SRTP ONLY ON THIS BROWSER'}`, 'sys');
 route(); // join/settings first; full share links boot straight into radio
 
