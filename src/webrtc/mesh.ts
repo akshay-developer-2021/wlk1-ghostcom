@@ -441,7 +441,8 @@ export class Mesh {
     const leg: Leg = { call, slot, mode, crypto: null };   // null=pending handshake
     this.legs.set(id, leg);
     this.knownOccupied.add(slot);
-    this._seenPeers.add(slot);
+    /* _seenPeers tracks only slots with PROVEN media — prevents phantom
+       sweep dialing after signaling churn. Added only on first media. */
     /* Linked means media-proven, not dialed: chips/count stay truthful
        while outbound probes are still unanswered (no more phantom units).
        Glare re-registers keep a streaming slot lit. */
@@ -720,6 +721,7 @@ export class Mesh {
     setPeer(slot, { stream, linked: true }); // first media = proof of life
     this._missStrikes.delete(slot);   // media is proof of life — reset ghost strikes
     this._dialFails.delete(slot);     // media is proof of life — unpark the slot
+    this._seenPeers.add(slot);        // only proven peers enter the memory
     this.log(`RX STREAM — UNIT-${slot}`, 'rx');
   }
 
