@@ -13,6 +13,7 @@
 
 export const WORKER_SRC = `
 let key = null, drops = 0, encCount = 0, decCount = 0;
+function bumpDrops() { drops++; if (drops % 50 === 0) self.postMessage({ type: 'drops', drops }); }
 async function encrypt(frame) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new Uint8Array(frame.data));
@@ -36,14 +37,14 @@ async function pump(readable, writable, direction) {
     for (;;) {
       const { value: frame, done } = await reader.read();
       if (done) break;
-      if (!key) { drops++; continue; }   // rekey race — drop, never send clear
+      if (!key) { bumpDrops(); continue; }   // rekey race — drop, never send clear
       let out = null;
       try {
         if (direction === 'encrypt') out = await encrypt(frame);
         else out = await decrypt(frame);
       } catch (_) { out = null; }
       if (out) { await writer.write(out); if (direction === 'encrypt') encCount++; else decCount++; }
-      else { drops++; }
+      else { bumpDrops(); }
     }
   } catch (_) { /* stream torn down on leg close */ }
   await writer.close().catch(() => {});
@@ -123,7 +124,10 @@ export class E2EE {
       [rawKeyBytes.buffer] as unknown as Transferable[],
     );
     this._ready = new Promise((res) => {
-      this._worker.onmessage = (e: MessageEvent) => { if (e.data?.type === 'ready') res(); };
+      this._worker.onmessage = (e: MessageEvent) => {
+        if (e.data?.type === 'ready') res();
+        else if (e.data?.type === 'drops') this._log(`FRAME DROPS ${e.data.drops} — POSSIBLE TAMPER/LOSS`, 'warn');
+      };
     });
     this.enabled = true;
   }

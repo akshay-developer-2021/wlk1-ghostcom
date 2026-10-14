@@ -14,7 +14,7 @@ transmitting.
 ```bash
 npm install
 npm run dev        # http://localhost:5173 (mic needs localhost or HTTPS)
-npm test           # vitest unit suite (31 tests)
+npm test           # vitest unit suite (82 tests)
 npm run typecheck  # tsc --noEmit (strict)
 npm run build      # production bundle → dist/
 npm run preview    # serve dist/ (e2e webServer target)
@@ -23,7 +23,7 @@ npm run test:e2e   # playwright matrix, needs: npx playwright install --with-dep
 
 Join a room two ways: open a share link (`#CH.SECRET`), or pick a
 channel + passphrase on the Join screen — both sides derive the same
-room secret locally (argon2id via `hash-wasm`, PBKDF2 fallback), so no
+room secret locally (argon2id via `hash-wasm`; fail-closed when WASM is blocked), so no
 link needs to be sent. See `PLAN.md` for the rebuild roadmap.
 
 Deploy `dist/` to **any static host with HTTPS** (Cloudflare Pages,
@@ -33,14 +33,14 @@ Netlify, GitHub Pages+proxy, etc.). No server-side code required.
 
 ```
 src/
-  core/crypto.js     room secrets → HMAC peer IDs, SAS codes, E2EE key
-  core/state.js      tiny reactive store (no framework)
-  core/battery.js    battery API, power-save, visibility, wake lock
-  audio/mic.js       cold-mic manager + WARM WINDOW + generation tokens
-  audio/silentTrack.js  guaranteed audio sender on every leg
-  audio/sfx.js       radio sound personality (per-unit roger beep) + haptics
-  webrtc/mesh.js     parallel slot claim, secret-verified legs, watchdog
-  security/e2ee.js   insertable-streams AES-GCM frame encryption
+  core/crypto.ts     room secrets → HMAC peer IDs, SAS codes, E2EE key
+  core/state.ts      tiny reactive store (no framework)
+  core/battery.ts    battery API, power-save, visibility, wake lock
+  audio/mic.ts       cold-mic manager + WARM WINDOW + generation tokens
+  audio/silentTrack.ts  guaranteed audio sender on every leg
+  audio/sfx.ts       radio sound personality (per-unit roger beep) + haptics
+  webrtc/mesh.ts     parallel slot claim, secret-verified legs, watchdog
+  security/e2ee.ts   insertable-streams AES-GCM frame encryption
   ui/*               LCD, PTT controller, VAD-gated render loop, boot theater
 ```
 
@@ -62,7 +62,7 @@ src/
   proves support over a side DataChannel — a peer without support gets
   a plain SRTP leg (never garbage audio), and the LCD badge shows the
   truth: `E2E` (all legs encrypted), `⚠ MIXED SRTP`, or `SRTP`.
-- **SAS verification**: a 4-character code derived from the room secret
+- **SAS verification**: a 6-character code derived from the room secret
   + every leg's DTLS fingerprint appears on the LCD. Team members
   compare it out-of-band; a MITM changes it.
 - **Cold mic**: hardware is acquired on PTT press only, released after
@@ -77,7 +77,7 @@ src/
 - Mic hardware off unless transmitting (warm window is muted capture).
 - Render loop is VAD-gated: 15 fps while someone speaks → 2 Hz poll
   when silent → fully stopped + AudioContext suspended with no peers.
-- Wake lock held only during TX. Matrix rain is a 2.5 s boot flourish.
+- Wake lock held only during TX. Matrix rain is an ambient backdrop.
 - Watchdog pauses when the tab is hidden; quality polling backs off.
 - Power-save mode (<20% battery, discharging) drops everything to 5 fps
   and kills cosmetic animations.

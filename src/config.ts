@@ -96,6 +96,8 @@ function asIceServers(v: unknown): IceServer[] | null {
 const DEFAULT_ICE: IceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:global.stun.twilio.com:3478' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
   // Public OpenRelay is a best-effort fallback. For production run your
   // own coturn and use short-lived HMAC credentials (see README).
   // turns: + credentialType are explicit for Safari, which prefers

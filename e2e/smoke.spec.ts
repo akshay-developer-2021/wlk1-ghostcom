@@ -2,7 +2,9 @@ import { test, expect } from '@playwright/test';
 
 // Mic-permission denials surface as console noise on headless/CI browsers
 // (no mic device, permission auto-denied) — never a product regression.
-const MIC_ALLOWLIST = /mic|permission|allow|denied|notallowed|notfound|audio|device/i;
+// Allowlist stays narrow (denial names only) so AudioContext/audio-plumbing
+// TypeErrors still fail loudly.
+const MIC_ALLOWLIST = /NotAllowedError|NotFoundError|permission|denied/i;
 
 test('smoke: shell renders with no TypeErrors', async ({ page }) => {
   const typeErrors: string[] = [];

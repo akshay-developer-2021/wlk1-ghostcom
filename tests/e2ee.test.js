@@ -204,4 +204,50 @@ describe('E2EE worker — frame crypto (WORKER_SRC)', () => {
     expect(res.message).toBeTruthy();
     expect('buf' in res).toBe(false);
   });
+
+  it('no drops telemetry under threshold (E2EE warn log stays silent)', async () => {
+    const w = spawn();
+    await initWorker(w, randomKey());
+    // Mirrors E2EE onmessage mapping: {type:'drops'} → log('FRAME DROPS n — …', 'warn').
+    const warns = [];
+    const onMsg = (m) => { if (m?.type === 'drops') warns.push({ msg: `FRAME DROPS ${m.drops} — POSSIBLE TAMPER/LOSS`, kind: 'warn' }); };
+    w.on('message', onMsg);
+    try {
+      const pumped = await rpc(
+        w,
+        { type: 't-pump', direction: 'decrypt', bufs: Array.from({ length: 10 }, () => new Uint8Array(5).buffer) },
+        't-pump-ok',
+      );
+      expect(pumped.count).toBe(0);
+      const stats = await getStats(w); // round-trip flush: any drops msg would arrive before stats
+      expect(stats.drops).toBe(10);
+      expect(warns).toEqual([]);
+    } finally {
+      w.off('message', onMsg);
+    }
+  });
+
+  it('drops telemetry fires once crossing 50 (E2EE warn log)', async () => {
+    const w = spawn();
+    await initWorker(w, randomKey());
+    // Mirrors E2EE onmessage mapping: {type:'drops'} → log('FRAME DROPS n — …', 'warn').
+    const warns = [];
+    const onMsg = (m) => { if (m?.type === 'drops') warns.push({ msg: `FRAME DROPS ${m.drops} — POSSIBLE TAMPER/LOSS`, kind: 'warn' }); };
+    w.on('message', onMsg);
+    try {
+      const pumped = await rpc(
+        w,
+        { type: 't-pump', direction: 'decrypt', bufs: Array.from({ length: 50 }, () => new Uint8Array(5).buffer) },
+        't-pump-ok',
+      );
+      expect(pumped.count).toBe(0);
+      const stats = await getStats(w); // flush: drops msg arrives before stats reply
+      expect(stats.drops).toBe(50);
+      expect(warns.length).toBe(1); // throttled by construction — only on crossing
+      expect(warns[0].kind).toBe('warn');
+      expect(warns[0].msg).toContain('50');
+    } finally {
+      w.off('message', onMsg);
+    }
+  });
 });

@@ -454,7 +454,11 @@ function setupJoin(): void {
   renderRecents();
 }
 
+/* Fire-and-forget triggers (join click + 2× Enter) must not overlap joins. */
+let joining = false;
+
 async function doJoin(): Promise<void> {
+  if (joining) { joinError('JOIN ALREADY RUNNING — HOLD ON'); return; }
   joinError('');
   const chRaw = $('joinChannel') instanceof HTMLInputElement
     ? ($('joinChannel') as HTMLInputElement).value : '';
@@ -470,6 +474,7 @@ async function doJoin(): Promise<void> {
     && ($('rememberMe') as HTMLInputElement).checked;
 
   try {
+    joining = true;
     if (joinMode === 'link') {
       const secret = generateRoomSecret();
       if (remember) {
@@ -521,6 +526,7 @@ async function doJoin(): Promise<void> {
     joinError(`JOIN FAILED — ${msg}`);
     log(`JOIN FAILED — ${msg}`, 'warn');
   } finally {
+    joining = false;
     if (btn instanceof HTMLButtonElement) {
       btn.disabled = false;
       btn.textContent = '▶ JOIN CHANNEL';

@@ -207,6 +207,75 @@ describe('beginTx — recvonly legs are redialed live', () => {
   });
 });
 
+describe('beginTx — empty-legs first-tap sweep mirrors watchdog zero-leg rule', () => {
+  it('fresh solo slot-0 with empty seen stays SOLO — no spray', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    try {
+      const { mesh } = makeMesh();
+      mesh.peer = { destroyed: false, call: vi.fn((id) => fakeCall(id, null)) };
+      mesh.mic = { stream: { id: 'live-mic-stream' } };
+      mesh.channel = '22';
+      mesh.slot = 0;
+      expect(mesh._seenPeers.size).toBe(0);
+
+      const report = await mesh.beginTx({ kind: 'audio' });
+
+      expect(mesh.peer.call).not.toHaveBeenCalled();
+      expect(report).toEqual({ attached: 0, redialed: 0 });
+      mesh.leave();
+    } finally {
+      set({ secret: null });
+    }
+  });
+
+  it('seen-gate blocks slot>0 fresh with no memory too', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    try {
+      const { mesh } = makeMesh();
+      mesh.peer = { destroyed: false, call: vi.fn((id) => fakeCall(id, null)) };
+      mesh.mic = { stream: { id: 'live-mic-stream' } };
+      mesh.channel = '22';
+      mesh.slot = 2;
+      expect(mesh._seenPeers.size).toBe(0);
+
+      const report = await mesh.beginTx({ kind: 'audio' });
+
+      expect(mesh.peer.call).not.toHaveBeenCalled();
+      expect(report).toEqual({ attached: 0, redialed: 0 });
+      mesh.leave();
+    } finally {
+      set({ secret: null });
+    }
+  });
+
+  it('slot-0 rejoiner with faces dials all unlinked non-self slots live; parked stays parked', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    const { mesh } = makeMesh();
+    const prevMax = mesh.cfg.maxSlots;
+    mesh.cfg.maxSlots = 3;
+    try {
+      const live = { id: 'live-mic-stream' };
+      mesh.peer = { destroyed: false, call: vi.fn((id) => fakeCall(id, null)) };
+      mesh.mic = { stream: live };
+      mesh.channel = '22';
+      mesh.slot = 0;
+      mesh._seenPeers.add(1);
+      mesh._seenPeers.add(2);
+      mesh._dialFails.set(1, 3);                       // parked — TX must not unpark
+
+      const report = await mesh.beginTx({ kind: 'audio' });
+
+      expect(mesh.peer.call).toHaveBeenCalledTimes(1); // only slot 2, slot 1 skipped
+      expect(report).toEqual({ attached: 0, redialed: 1 });
+      expect(mesh.peer.call.mock.calls[0][1]).toBe(live);
+      mesh.leave();
+    } finally {
+      mesh.cfg.maxSlots = prevMax;
+      set({ secret: null });
+    }
+  });
+});
+
 describe('leg close — stale-event guard (close-identity)', () => {
   it('a replaced leg cannot kill its replacement', () => {
     const { mesh } = makeMesh();

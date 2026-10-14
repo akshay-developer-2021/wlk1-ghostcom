@@ -55,6 +55,7 @@ export class Mesh {
      misses), this is memory: it tells the zero-leg sweep whether anyone
      could possibly be out there. Fresh solo joins stay silent. */
   private _seenPeers = new Set<number>();
+  private _roomSecret: string | null = null; // room identity is channel+secret, not channel alone
   private _dialFails = new Map<number, number>(); // slot -> consecutive transport failures (never-connected / ICE / dead dial)
   private _joinMutex: Promise<JoinResult | undefined> | null = null;
   private _rejoinInFlight: Promise<void> | null = null;
@@ -87,10 +88,14 @@ export class Mesh {
 
   async _join(channel: string): Promise<JoinResult> {
     const prevChannel = this.channel;
+    const prevSecret = this._roomSecret;
     this.leave();
-    /* Channel changed → new room, forget old faces. Same-channel rejoin
-       keeps them: the rejoiner is exactly who the sweep must rediscover. */
-    if (prevChannel !== channel) this._seenPeers.clear();
+    /* New room (channel OR secret changed) → forget old faces, or a
+       fresh-key manual join inherits strangers and sweeps them forever.
+       Same-room rejoin keeps them: the rejoiner is exactly who the
+       sweep must rediscover. */
+    if (prevChannel !== channel || prevSecret !== state.secret) this._seenPeers.clear();
+    this._roomSecret = state.secret ?? null;
     set({ joined: false, connected: false });
     this.channel = channel;
     this.log(`SCANNING CH ${channel}…`, 'sys');
@@ -232,7 +237,7 @@ export class Mesh {
     set({ mySlot: -1, joined: false, connected: false, sas: null });
   }
 
-  destroy(): void { this._destroyed = true; this._seenPeers.clear(); this.leave(true); }
+  destroy(): void { this._destroyed = true; this._seenPeers.clear(); this._roomSecret = null; this.leave(true); }
 
   /* ── SIGNALING WIRING ──────────────────────────────────── */
   _wirePeer(p: Peer): void {
@@ -437,7 +442,10 @@ export class Mesh {
     this.legs.set(id, leg);
     this.knownOccupied.add(slot);
     this._seenPeers.add(slot);
-    setPeer(slot, { linked: true });
+    /* Linked means media-proven, not dialed: chips/count stay truthful
+       while outbound probes are still unanswered (no more phantom units).
+       Glare re-registers keep a streaming slot lit. */
+    setPeer(slot, { linked: state.peers.get(slot)?.stream ? true : false });
     call.on('stream', (remote: MediaStream) => {
       if (this.legs.get(id)?.call !== call) return;   // stale event from a replaced leg
       clearTimeout(leg._neverTimer);
@@ -709,7 +717,7 @@ export class Mesh {
   }
 
   _onRemoteStream(slot: number, stream: MediaStream): void {
-    setPeer(slot, { stream });
+    setPeer(slot, { stream, linked: true }); // first media = proof of life
     this._missStrikes.delete(slot);   // media is proof of life — reset ghost strikes
     this._dialFails.delete(slot);     // media is proof of life — unpark the slot
     this.log(`RX STREAM — UNIT-${slot}`, 'rx');
@@ -865,11 +873,13 @@ export class Mesh {
         } catch { /* noop */ }
       }
     }
-    if (!stale.length && !redialSlots.length && live && this.slot > 0 && secret && channel) {
-      /* PTT-first-tap: joined but holding no legs yet (every dial was
-         skipped pre-gesture) — dial all lower slots directly with the
-         live mic stream. */
-      for (let j = 0; j < this.slot; j++) {
+    if (!stale.length && !redialSlots.length && live && secret && channel && this.slot >= 0 && this._seenPeers.size > 0) {
+      /* PTT-first-tap zero-leg sweep (mirrors watchdog): a rejoiner with
+         faces rediscovers all unlinked non-self slots live; a fresh solo
+         with empty seen stays silent instead of spraying empty slots. */
+      for (let j = 0; j < this.cfg.maxSlots; j++) {
+        if (j === this.slot) continue;
+        if ([...this.legs.values()].some((l) => l.slot === j)) continue;
         if (this._destroyed) break;
         if ((this._dialFails.get(j) ?? 0) >= 3) continue; // parked — TX doesn't unpark
         try {
