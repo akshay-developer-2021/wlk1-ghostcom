@@ -28,7 +28,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
       - run: npm run test:e2e
 
@@ -44,7 +44,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps webkit
+      - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
       - run: npm run test:e2e:webkit
 
@@ -67,7 +67,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      - run: npx playwright install --with-deps chromium webkit ${{ matrix.browser }}
       - run: npm run build
       - run: npm run test:e2e:${{ matrix.browser }}
 
