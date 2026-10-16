@@ -227,13 +227,14 @@ export async function testMicPath(page: Page): Promise<void> {
   await expect(page.locator('#toast')).toContainText('MIC OK', { timeout: 8000 });
 }
 
-/** Two PTT cycles: cold then warm (warm window keeps the hardware hot). */
-export async function testWarmWindow(page: Page): Promise<void> {
+/** Two PTT cycles: every press pays its own cold hardware wake (no warm
+    window; the permission grant persists after the first press). */
+export async function testColdCycles(page: Page): Promise<void> {
   await pttHold(page, 'button', 1000);
   await page.waitForTimeout(100);
   const start = Date.now();
   await pttHold(page, 'button', 1000);
-  console.log(`[WarmWindow] second PTT cycle took ${Date.now() - start}ms`);
+  console.log(`[ColdCycles] second PTT cycle took ${Date.now() - start}ms`);
 }
 
 /**

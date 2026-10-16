@@ -77,7 +77,7 @@ src/
     session/    session phase machine (pure transitions + effects)
     mesh/       parallel slot claim, secret-verified legs, watchdog
     security/   encoded-transform AES-GCM frame encryption
-    audio/      cold-mic manager + warm window, silent carrier, sfx
+    audio/      PTT-gated mic manager, silent carrier, sfx
     battery.ts  battery API, power-save, visibility, wake lock
   app/          sequences the machines and owns effects
     session/    session orchestration, share links
@@ -108,18 +108,20 @@ src/
 - **SAS verification**: a 6-character code derived from the room secret
   + every leg's DTLS fingerprint appears on the LCD. Team members
   compare it out-of-band; a MITM changes it.
-- **Warm mic**: hardware is acquired when you **join a room**, then muted
-  in a 45s warm window (instant next TX; indicator disappears). Acquiring
-  at join is what keeps the permission prompt and the cold-device wake off
-  the first PTT press. Leaving a room hard-releases the hardware. Mic-test
-  path is verified to hard-release.
+- **Mic on demand**: the hardware is acquired on the **first PTT press**
+  and released the moment TX ends — nothing captures, and no device
+  indicator is lit, between transmissions. The browser's permission prompt
+  therefore lands when the mic is first actually required; once answered,
+  the grant persists per origin and later presses skip it. Leaving a room
+  hard-releases the hardware. Mic-test path is verified to hard-release.
 - **Hardened page**: CSP with no third-party script origins, peerjs is
   bundled from npm (no CDN supply chain), fonts self-hosted, all
   peer-derived text rendered via `textContent` (XSS-safe).
 
 ## Battery design
 
-- Mic hardware off unless transmitting (warm window is muted capture).
+- Mic hardware off unless transmitting — capture exists only between PTT
+  press and release.
 - Render loop is VAD-gated: 15 fps while someone speaks → 2 Hz poll
   when silent → fully stopped + AudioContext suspended with no peers.
 - Wake lock held only during TX. Matrix rain is an ambient backdrop.
@@ -148,7 +150,7 @@ src/
 | Peer IDs guessable (`wlk1-ch-22-3`) | HMAC-derived IDs + inbound verification |
 | "E2E" badge was DTLS-only | insertable-streams AES-GCM + honest badge + SAS |
 | Sequential slot scan (join up to 40 s) | parallel claim (~1 s), full-vs-unreachable diagnosis |
-| 350–700 ms PTT latency | warm-mic window → ~100 ms re-arm |
+| 350–700 ms PTT latency | no warm window — each press pays a cold device wake; the grant persists after the first |
 | rAF ran forever with peers linked | VAD-gated 15fps→2Hz→sleep ladder |
 | Ghost legs from dialing empty slots | `peer-unavailable` cleanup + known-occupied watchdog |
 | Broker `disconnected` fallback was a no-op | immediate reconnect + backoff + full rejoin |

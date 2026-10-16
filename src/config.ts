@@ -35,7 +35,6 @@ export interface AppConfig {
   iceServers: IceServer[];
   maxSlots: number;
   slotProbeTimeoutMs: number;
-  warmWindowMs: number;
   watchdogMs: number;
   statsPollMs: number;
   maxTxMs: number;            // safety: TX auto-cutoff after 5 min
@@ -121,7 +120,6 @@ function buildConfig(): AppConfig {
     iceServers: DEFAULT_ICE,
     maxSlots: 8,
     slotProbeTimeoutMs: 4000,
-    warmWindowMs: 45_000,
     watchdogMs: 15_000,
     statsPollMs: 15_000,
     maxTxMs: 5 * 60_000,

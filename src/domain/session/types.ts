@@ -68,11 +68,11 @@ export interface CryptoPort {
   passphraseStrength(pass: string): { score: number; label: string };
 }
 
-/** Port: mic lifecycle owned by the session. Warm-up belongs to the join
-    (permission prompt + cold-device wake must not land on press #1); the
-    release belongs to the leave (a room you left must not hold hardware). */
+/** Port: mic hardware owned by the session. The capture window itself
+    belongs to the PTT gesture (mic.ts): nothing is acquired at join, so
+    the session's only obligation is that a room you left holds no
+    hardware. */
 export interface MicPort {
-  warmUp(): Promise<void>;
   release(): void;
 }
 
@@ -109,5 +109,5 @@ export interface SessionDeps {
   storage: StoragePort;
   ui: UiPort;
   log: LogFn;
-  config: { warmWindowMs: number; maxTxMs: number };
+  config: { maxTxMs: number };
 }

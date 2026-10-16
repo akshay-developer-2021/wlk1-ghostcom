@@ -10,7 +10,7 @@ const dom = installDom({ ids: { ptt: pttBtn, toast: new FakeElement('div'), sync
 const { createPTT } = await import('../src/app/radio/ptt.js');
 
 function makeDeps(overrides = {}) {
-  const calls = { beginTx: 0, endTx: 0, mute: 0, release: 0, wake: 0, dropWake: 0 };
+  const calls = { beginTx: 0, endTx: 0, release: 0, wake: 0, dropWake: 0 };
   const micStream = { id: 'mic-stream' };
   return {
     calls,
@@ -29,17 +29,15 @@ function makeDeps(overrides = {}) {
       },
       mic: {
         hot: false,
-        warm: false,
         generation: 1,
         stream: micStream,
         acquire: vi.fn(async () => ({ stream: micStream, track: { id: 't' }, generation: 1 })),
         release: vi.fn(() => { calls.release++; }),
-        mute: vi.fn(() => { calls.mute++; }),
         onEnded: vi.fn(),
       },
       sfx: { haptic: vi.fn(), pttOpen: vi.fn(), pttClose: vi.fn(), roger: vi.fn(), warn: [1] },
       power: { holdWake: vi.fn(() => { calls.wake++; }), dropWake: vi.fn(() => { calls.dropWake++; }) },
-      config: { warmWindowMs: 45000, maxTxMs: 300000 },
+      config: { maxTxMs: 300000 },
       ...overrides,
     },
   };
@@ -63,6 +61,14 @@ describe('PTT', () => {
     ptt.release('pointer');
     expect(state.tx).toBe(false);
     expect(pttBtn.classList.contains('pressed')).toBe(false);
+  });
+
+  it('releasing TX stops the mic hardware immediately (no warm window)', async () => {
+    const { deps, calls } = makeDeps();
+    const ctl = createPTT(deps);
+    await ctl.press('pointer');
+    ctl.release('pointer');
+    expect(calls.release).toBeGreaterThan(0);   // hardware off the moment TX ends
   });
 
   it('holds TX while any holder remains — releasing one never cuts the other', async () => {
@@ -111,7 +117,7 @@ describe('PTT', () => {
     vi.useFakeTimers();
     try {
       const { deps } = makeDeps();
-      deps.config = { warmWindowMs: 45000, maxTxMs: 50 };
+      deps.config = { maxTxMs: 50 };
       const ctl = createPTT(deps);
       await ctl.press('pointer');
       expect(state.tx).toBe(true);

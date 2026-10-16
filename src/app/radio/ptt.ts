@@ -127,7 +127,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, 
   }
 
   /** Release-during-arm: the gesture ended while join / mic-acquire /
-      beginTx was still in flight. The stale path may already have warmed
+      beginTx was still in flight. The stale path may already have opened
       the mic or attached it to senders, so tear all of it down — never
       leave a hot mic or a mic-carrying sender with no TX state.
       When a newer gesture has since claimed the button (token moved past
@@ -135,7 +135,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, 
   function abortArming(gen: number): void {
     if (gen + 1 !== token) return;
     try { mesh.endTx(); } catch { /* abort is best-effort — must not throw */ }
-    try { mic.mute(); } catch { /* abort is best-effort — must not throw */ }
+    try { mic.release(); } catch { /* abort is best-effort — must not throw */ }
     set({ micHot: false });
     setMicLed(false);
     btn.classList.remove('pressed');
@@ -171,7 +171,7 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, 
     if (state.tx) {
       const dur = ((Date.now() - txStart) / 1000).toFixed(1);
       mesh.endTx();
-      mic.mute();                         // warm window — instant next TX
+      mic.release();                      // hardware off the moment TX ends
       set({ tx: false, micHot: false });
       setMicLed(false);
       setLed('txLed', '');
@@ -203,20 +203,13 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, 
   }
 
   /* Sudden mic death mid-TX (device unplugged, OS revoke): never sit in
-     TX on a dead track — drop the air and tell the user to re-tap.
-     (Warm-expiry stops land here too, but state.tx is already false.) */
+     TX on a dead track — drop the air and tell the user to re-tap. */
   mic.onEnded(() => {
     if (state.tx) {
       toast('MIC LOST — RE-TAP');
       log('MIC LOST MID-TX — DROPPED', 'warn');
       forceRelease();
     }
-  });
-
-  /* Locked screen with a warm mic: drop hardware now so the next press
-     takes a clean cold path instead of resuming an OS-revoked corpse. */
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && !state.tx && mic.warm) mic.release();
   });
 
   /* pointer events */

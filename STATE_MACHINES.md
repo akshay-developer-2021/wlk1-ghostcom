@@ -94,6 +94,8 @@ hint dialog. View changes must never park focus on an input — the keypad
 ignores keydown from inputs, so that would kill every shortcut.
 
 **Mic** hands out a generation token with every acquire: a released button
-can never latch a live mic. After `warmWindowMs` the track is stopped and
-the OS indicator goes dark. Callers must compare the generation before any
+can never latch a live mic. The capture window IS the PTT gesture — the
+hardware is acquired on press and stopped the moment TX ends (no warm
+window), so the browser permission prompt lands on the first press and
+never at load or join. Callers must compare the generation before any
 side effect.

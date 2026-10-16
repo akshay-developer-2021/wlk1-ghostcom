@@ -4,7 +4,7 @@ import { set, clearPeers } from '../src/domain/state/state.js';
 
 /** Minimal in-memory doubles for every SessionService port. */
 function makeDeps() {
-  const calls = { joins: [], leaves: 0, screens: [], toasts: [], hashes: [], e2eeSet: [], micWarm: 0, micRelease: 0 };
+  const calls = { joins: [], leaves: 0, screens: [], toasts: [], hashes: [], e2eeSet: [], micRelease: 0 };
   let meshChannel = null;
 
   const mesh = {
@@ -45,11 +45,10 @@ function makeDeps() {
   };
 
   const mic = {
-    warmUp: async () => { calls.micWarm++; },
     release: () => { calls.micRelease++; },
   };
 
-  const deps = { mesh, e2ee, mic, crypto: cryptoPort, storage, ui, log: vi.fn(), config: { warmWindowMs: 5000, maxTxMs: 60000 } };
+  const deps = { mesh, e2ee, mic, crypto: cryptoPort, storage, ui, log: vi.fn(), config: { maxTxMs: 60000 } };
   return { deps, calls };
 }
 
@@ -172,42 +171,24 @@ describe('SessionService', () => {
     expect(session.getState().phase).toBe('failed');
   });
 
-  /* bug #2 — the first PTT press must never pay for the mic permission
-     prompt or the cold-device wake; the JOIN does. */
-  it('a successful join warms the mic so press #1 is warm', async () => {
+  /* The mic port is release-only: the join calling anything else (the
+     removed warmUp, an acquire) would throw a TypeError here and fail the
+     phase transition — the prompt must wait for the first PTT press. */
+  it('a join never touches the mic — the first PTT press owns the prompt', async () => {
     const { deps, calls } = makeDeps();
-    const session = new SessionService(deps);
-
-    await session.initFromHash('22', SECRET);
-    await vi.waitFor(() => expect(calls.micWarm).toBe(1));
-  });
-
-  it('a FAILED join does not warm the mic — no room, no hardware', async () => {
-    const { deps, calls } = makeDeps();
-    deps.mesh.join = async () => ({ ok: false, reason: 'full' });
-    const session = new SessionService(deps);
-
-    await session.initFromHash('22', SECRET);
-    await new Promise((r) => setTimeout(r, 10));
-    expect(calls.micWarm).toBe(0);
-  });
-
-  it('leaving releases the mic so the warm window cannot outlive the room', async () => {
-    const { deps, calls } = makeDeps();
-    const session = new SessionService(deps);
-    await session.initFromHash('22', SECRET);
-    await vi.waitFor(() => expect(calls.micWarm).toBe(1));
-
-    await session.leave();
-    expect(calls.micRelease).toBe(1);
-  });
-
-  it('a blocked mic must never fail the join itself', async () => {
-    const { deps, calls } = makeDeps();
-    deps.mic.warmUp = async () => { throw new Error('NotAllowedError'); };
     const session = new SessionService(deps);
 
     expect(await session.initFromHash('22', SECRET)).toBe(true);
     expect(session.getState().phase).toBe('joined');
+    expect(calls.micRelease).toBe(0);
+  });
+
+  it('leaving releases the mic so no room outlives its hardware', async () => {
+    const { deps, calls } = makeDeps();
+    const session = new SessionService(deps);
+    await session.initFromHash('22', SECRET);
+
+    await session.leave();
+    expect(calls.micRelease).toBe(1);
   });
 });

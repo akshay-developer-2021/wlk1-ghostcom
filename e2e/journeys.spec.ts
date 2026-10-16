@@ -13,7 +13,7 @@ import {
   adjustVolume,
   openSettings,
   testMicPath,
-  testWarmWindow,
+  testColdCycles,
   testNewIdentity,
   testPassphraseJoin,
   testRecentRoom,
@@ -268,7 +268,7 @@ radioTest('resilience: tab hide/show and offline/online both recover the link', 
   await waitForMeshLink(pageA, pageB);
 });
 
-radioTest('power & audio path: battery, PTT wake lock, mic test, warm window', async ({ alice, bob, logs }) => {
+radioTest('power & audio path: battery, PTT wake lock, mic test, cold re-arm', async ({ alice, bob, logs }) => {
   const { page: pageA } = alice;
   const { page: pageB } = bob;
   await useLocalBroker([pageA, pageB]);
@@ -286,8 +286,8 @@ radioTest('power & audio path: battery, PTT wake lock, mic test, warm window', a
   console.log('[3] mic test');
   await testMicPath(pageA);
 
-  console.log('[4] cold → warm → cold');
-  await testWarmWindow(pageA);
+  console.log('[4] cold → cold (no warm window)');
+  await testColdCycles(pageA);
 });
 
 /** Boot both pages, assert the first-run hint appears, then dismiss it. */
@@ -299,14 +299,20 @@ async function bootWithHint(pageA: import('@playwright/test').Page, pageB: impor
 }
 
 /**
- * bug #2 — the first PTT press must open the squelch on its own.
+ * Cold mic — the prompt belongs to the first PTT press and nothing earlier.
  *
- * Deliberately NOT the alice/bob fixtures: those pre-grant the mic, and
- * Chromium's --use-fake-ui-for-media-stream auto-accepts a prompt anyway, so
- * every other journey has always run with an already-warm mic. That
- * pre-approval is precisely why this bug reached users with a green suite.
+ * Product decision: the browser's mic prompt must land when the mic is
+ * actually required (the first press) and never at load or join. This
+ * journey proves: (1) the cold getUserMedia hold is NOT consumed before
+ * the press — if the app asked at load, the press would arm instantly;
+ * (2) the same held press arms once the prompt is answered; (3) the
+ * hardware is released the moment TX ends; (4) the next press reuses the
+ * grant with no prompt.
+ *
+ * Deliberately NOT the alice/bob fixtures: those pre-grant the mic, so
+ * every other journey has always run with the grant already present.
  */
-radioTest('cold mic: one press opens the squelch when nothing was pre-approved', async ({ browser, browserName }) => {
+radioTest('cold mic: the prompt lands on the first PTT press and never before it', async ({ browser, browserName }) => {
   /* Engines that rely on the in-page fake mic cannot run this: the stub
      never installs there (see needsFakeMicStub), so getUserMedia falls
      through to the real API and is denied, which is a different failure
@@ -323,29 +329,36 @@ radioTest('cold mic: one press opens the squelch when nothing was pre-approved',
     await closeHint(page);
     await waitForBrokerConnected(page);
 
-    console.log(`[1] the JOIN absorbs the ${COLD_MIC_MS}ms unanswered-mic cost`);
-    /* Precondition, asserted on the visible traffic log: the operator has
-       joined and can see the net before reaching for the button. */
-    await expect
-      .poll(async () => (await appLogs(page)).join('\n'), { timeout: 30_000 })
-      .toContain('MIC MUTED — WARM WINDOW');
+    console.log('[1] parked on the radio — nothing was asked');
+    await page.waitForTimeout(500);
+    expect((await appLogs(page)).join('\n'), 'no mic may be acquired before the press').not.toContain('MIC HOT');
 
-    console.log('[2] ONE press arms the squelch');
+    console.log(`[2] ONE press pays the ${COLD_MIC_MS}ms prompt and arms`);
     const armedAt = Date.now();
     await page.locator('#ptt').dispatchEvent('pointerdown');
     /* generous wait on purpose: we want the real arm latency MEASURED, not
        the assertion doing the measuring by timing out */
     await expect(page.locator('#txLed')).toHaveClass(/tx/, { timeout: 30_000 });
     const armMs = Date.now() - armedAt;
+    /* the prompt cost lands HERE, on the press — not on the load */
+    expect(armMs, `first press armed in ${armMs}ms — the ${COLD_MIC_MS}ms prompt must cost the press, not the load`).toBeGreaterThanOrEqual(COLD_MIC_MS - 500);
     await page.waitForTimeout(500);
     await page.locator('#ptt').dispatchEvent('pointerup');
     await expect(page.locator('#txLed')).not.toHaveClass(/tx/, { timeout: 5000 });
 
-    /* the symptom: the join absorbed the cost, so press #1 did not */
-    expect(armMs, `first press armed in ${armMs}ms against a ${COLD_MIC_MS}ms cold mic`).toBeLessThan(1000);
-    /* the mechanism: it resumed the join's hardware, not a fresh grant */
-    expect(await appLogs(page), 'first press must warm-resume').toContain('MIC WARM-RESUME — 0ms WAKE');
-    console.log(`[3] first press armed in ${armMs}ms — no second press needed`);
+    console.log('[3] release drops the hardware');
+    await expect
+      .poll(async () => (await appLogs(page)).join('\n'), { timeout: 5000 })
+      .toContain('MIC RELEASED — HW OFF');
+
+    console.log('[4] second press reuses the grant — no prompt, instant arm');
+    const againAt = Date.now();
+    await page.locator('#ptt').dispatchEvent('pointerdown');
+    await expect(page.locator('#txLed')).toHaveClass(/tx/, { timeout: 5000 });
+    const arm2Ms = Date.now() - againAt;
+    await page.locator('#ptt').dispatchEvent('pointerup');
+    expect(arm2Ms, `second press armed in ${arm2Ms}ms — the grant already exists`).toBeLessThan(1000);
+    console.log(`[5] second press armed in ${arm2Ms}ms with no prompt`);
   } finally {
     await context.close();
   }

@@ -135,18 +135,12 @@ export class SessionService {
 
     this.transition(nextState);
 
-    if (nextState.phase === 'joined') {
-      /* The mic permission prompt and the cold-device wake belong to the
-         JOIN. Left on the PTT path, the very first press always arrives
-         before the hardware does, and the user learns to press twice. */
-      /* `void` alone would NOT catch — a rejecting port would surface as an
-         unhandled rejection and the session must not depend on MicManager
-         swallowing its own errors. */
-      void this.deps.mic.warmUp().catch(() => {});
-      if (!this.hintShown) {
-        this.hintShown = true;
-        this.deps.ui.showHintOnce();
-      }
+    if (nextState.phase === 'joined' && !this.hintShown) {
+      /* The mic is NOT touched here: the permission prompt and the capture
+         window belong to the PTT gesture itself (mic.ts), never to the
+         join. Nothing is asked until the mic is actually required. */
+      this.hintShown = true;
+      this.deps.ui.showHintOnce();
     }
     return nextState.phase === 'joined';
   }
@@ -155,7 +149,7 @@ export class SessionService {
     const [nextState, effects] = executeLeave(this.state);
     if (effects.stopQualityPolling) this.deps.mesh.stopQualityPolling();
     if (effects.meshLeave) this.deps.mesh.leave();
-    this.deps.mic.release();                 // warm window must not outlive the room
+    this.deps.mic.release();                 // no room outlives its hardware
     if (effects.showScreen) this.deps.ui.showScreen(effects.showScreen);
     this.deps.ui.clearWords();
 

@@ -4,8 +4,8 @@
  * Chromium has --use-fake-device-for-media-stream. Firefox and WebKit have
  * no equivalent flag, so getUserMedia is stubbed in-page with a real sine
  * tone routed into a MediaStreamDestination. The app still exercises its real
- * mic path (generation tokens, warm window, LED, teardown) — only the OS
- * device is simulated.
+ * mic path (generation tokens, PTT-gated release, LED, teardown) — only the
+ * OS device is simulated.
  */
 
 /** Init script: install the stub before any app code runs.
@@ -47,15 +47,13 @@ export const FAKE_MIC_SCRIPT = (toneHz = 220): void => {
  *
  * Every other spec runs with the mic effectively pre-approved: the alice/bob
  * fixtures call grantPermissions(), and Chromium's
- * --use-fake-ui-for-media-stream auto-accepts a prompt anyway. Playwright
- * cannot raise a real OS permission dialog headlessly, so that pre-approval
- * is why bug #2 — the first PTT press paying for the permission prompt, the
- * AudioContext gesture and the cold-device wake — never fired in CI.
+ * --use-fake-ui-for-media-stream auto-accepts a prompt anyway.
  *
- * What a real prompt does to the app is hold the getUserMedia promise open
- * until the user answers. This reproduces exactly that, on whatever
+ * What a real prompt does to the app is hold the FIRST getUserMedia call
+ * open until the user answers; once answered, the grant persists and every
+ * later call resolves immediately. This reproduces exactly that on whatever
  * getUserMedia is installed above it, so the app takes the same cold path a
- * first-time visitor takes.
+ * first-time visitor takes on the first PTT press.
  *
  * Must be registered AFTER FAKE_MIC_SCRIPT so it wraps the engine's stub.
  */
@@ -63,14 +61,18 @@ export const COLD_MIC_SCRIPT = (delayMs: number): void => {
   const md = navigator.mediaDevices;
   if (!md) return;
   const inner = md.getUserMedia.bind(md);
+  let answered = false;
   md.getUserMedia = async (constraints: MediaStreamConstraints) => {
-    await new Promise((r) => setTimeout(r, delayMs));
+    if (!answered) {
+      answered = true;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
     return inner(constraints);
   };
 };
 
-/** How long an unanswered permission prompt is modelled to hold gUM open.
-    Large enough to be unmistakable in a timeline, small enough that a
+/** How long the unanswered first prompt is modelled to hold getUserMedia
+    open. Large enough to be unmistakable in a timeline, small enough that a
     suite does not spend its life waiting. */
 export const COLD_MIC_MS = 2500;
 

@@ -46,7 +46,7 @@ import { shareChannel } from './app/session/share.js';
 
 /* ── instantiate core services ──────────────────────────────── */
 const sfx = new Sfx({ log });
-const mic = new MicManager({ warmWindowMs: CONFIG.warmWindowMs, log });
+const mic = new MicManager({ log });
 const power = new PowerManager({ log });
 const mesh = new Mesh({ sfx, mic, log, config: CONFIG });
 
@@ -64,10 +64,7 @@ const session = new SessionService({
     deriveRawGroupKey,
     create: (rawKey: Uint8Array, logFn: (msg: string, kind?: string) => void) => new E2EE(rawKey, logFn),
   },
-  mic: {
-    warmUp: () => mic.warmUp(),
-    release: () => mic.release(),
-  },
+  mic: { release: () => mic.release() },
   crypto: {
     generateRoomSecret,
     isValidRoomSecret,
@@ -88,7 +85,7 @@ const session = new SessionService({
     clearWords,
   },
   log,
-  config: { warmWindowMs: CONFIG.warmWindowMs, maxTxMs: CONFIG.maxTxMs },
+  config: { maxTxMs: CONFIG.maxTxMs },
 });
 
 /* ── UI wiring ─────────────────────────────────────────────── */
