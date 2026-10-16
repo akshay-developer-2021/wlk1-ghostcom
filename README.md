@@ -2,24 +2,62 @@
 
 Single-purpose, zero-backend push-to-talk voice radio. Hold the glass
 button, talk, release. Rooms are secret-keyed, audio is end-to-end
-encrypted, and the microphone hardware is **off** whenever you are not
+encrypted, and the microphone hardware is released as soon as you stop
 transmitting.
 
-> Born from the PoC in `legacy/index.html` — rebuilt as a production
-> Vite app after a 5-angle audit (security, performance, battery,
-> reliability, UX). See "What changed from the PoC" below.
+> Rebuilt as a layered Vite app after a 5-angle audit (security,
+> performance, battery, reliability, UX).
 
 ## Quick start
 
 ```bash
 npm install
 npm run dev        # http://localhost:5173 (mic needs localhost or HTTPS)
-npm test           # vitest unit suite (82 tests)
+npm test           # vitest unit suite (138 tests)
 npm run typecheck  # tsc --noEmit (strict)
 npm run build      # production bundle → dist/
 npm run preview    # serve dist/ (e2e webServer target)
-npm run test:e2e   # playwright matrix, needs: npx playwright install --with-deps chromium firefox webkit
+npm run test:e2e     # playwright, chromium (default)
+npm run test:e2e:all # full matrix: chromium + webkit + firefox
+                       # needs: npx playwright install --with-deps chromium firefox webkit
 ```
+
+### Test coverage and known gaps
+
+| Suite | Command | Status |
+|---|---|---|
+| types | `npm run typecheck` | strict, clean |
+| units | `npm test` | 138 tests |
+| end-to-end | `npm run test:e2e` | **enforced** — chromium, 12 journeys |
+| batch 1:1 | `npm run test:e2e:batch` | N two-process sessions |
+| webkit | `npm run test:e2e:webkit` | **enforced** — 7/7 active journeys (two engine-limit skips) |
+| firefox | `npm run test:e2e:firefox` | advisory `continue-on-error` lane in CI; see below |
+
+> The e2e suite asserts the E2EE worker discarded **zero** frames after a
+> tone round trip. On the headless Chromium used here that check passes
+> vacuously — Chromium fires `onrtctransform` but never delivers encoded
+> frames to the worker, so both counters read zero whatever the code does.
+> The assertion has teeth only on an engine that runs the pipeline; the
+> journey prints its counts so a vacuous pass is visible in the log.
+
+Known gaps, tracked rather than hidden:
+- **WebKit** — the dc-close departure signal (findings 1–4 of
+  `REVIEW-round1.md`) is now wired end to end: a closed datachannel
+  drops the leg, a graceful leave says `BYE` over the wire first, and a
+  leg whose crypto channel never opened evicts + redials within ~8s.
+  All but two journeys pass (the two skips are engine limits: WebKit
+  `decodeAudioData` cannot decode MediaRecorder output, and its fake-mic
+  stub cannot install on this engine). Remaining watch item: the WebKit
+  wedge can still drop the signaling socket with the leg; recovery is
+  the reconnect chain + socket-open re-dial, verified by unit tests and
+  not known to wedge anymore.
+- **Firefox** — Playwright cannot launch its bundled patched Firefox
+  (`firefox-1555`) on this host at all ("Could not find profile folder",
+  identical for stock runs outside Playwright — upstream
+  microsoft/playwright#42768 class). Installing stock Firefox does **not**
+  help: Playwright only ever launches its own build. The CI lane runs with
+  `continue-on-error` until the host-level issue clears or a green CI run
+  happens.
 
 Join a room two ways: open a share link (`#CH.SECRET`), or pick a
 channel + passphrase on the Join screen — both sides derive the same
@@ -33,15 +71,20 @@ Netlify, GitHub Pages+proxy, etc.). No server-side code required.
 
 ```
 src/
-  core/crypto.ts     room secrets → HMAC peer IDs, SAS codes, E2EE key
-  core/state.ts      tiny reactive store (no framework)
-  core/battery.ts    battery API, power-save, visibility, wake lock
-  audio/mic.ts       cold-mic manager + WARM WINDOW + generation tokens
-  audio/silentTrack.ts  guaranteed audio sender on every leg
-  audio/sfx.ts       radio sound personality (per-unit roger beep) + haptics
-  webrtc/mesh.ts     parallel slot claim, secret-verified legs, watchdog
-  security/e2ee.ts   insertable-streams AES-GCM frame encryption
-  ui/*               LCD, PTT controller, VAD-gated render loop, boot theater
+  domain/       the machines — no DOM, all testable
+    crypto/     room secrets → HMAC peer IDs, SAS codes, E2EE key
+    state.ts    tiny reactive store (no framework)
+    session/    session phase machine (pure transitions + effects)
+    mesh/       parallel slot claim, secret-verified legs, watchdog
+    security/   encoded-transform AES-GCM frame encryption
+    audio/      cold-mic manager + warm window, silent carrier, sfx
+    battery.ts  battery API, power-save, visibility, wake lock
+  app/          sequences the machines and owns effects
+    session/    session orchestration, share links
+    radio/      PTT, render loop, remote audio sink
+    router/     hash router
+  infra/        storage, DOM helpers
+  ui/           components that subscribe to the store
 ```
 
 ## Security model (honest version)
@@ -65,9 +108,11 @@ src/
 - **SAS verification**: a 6-character code derived from the room secret
   + every leg's DTLS fingerprint appears on the LCD. Team members
   compare it out-of-band; a MITM changes it.
-- **Cold mic**: hardware is acquired on PTT press only, released after
-  a 45s muted warm window (instant next TX; indicator disappears).
-  Mic-test path is verified to hard-release.
+- **Warm mic**: hardware is acquired when you **join a room**, then muted
+  in a 45s warm window (instant next TX; indicator disappears). Acquiring
+  at join is what keeps the permission prompt and the cold-device wake off
+  the first PTT press. Leaving a room hard-releases the hardware. Mic-test
+  path is verified to hard-release.
 - **Hardened page**: CSP with no third-party script origins, peerjs is
   bundled from npm (no CDN supply chain), fonts self-hosted, all
   peer-derived text rendered via `textContent` (XSS-safe).

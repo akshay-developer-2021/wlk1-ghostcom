@@ -19,15 +19,15 @@ vi.mock('peerjs', () => ({
     destroy() { this.destroyed = true; }
   },
 }));
-vi.mock('../src/audio/silentTrack.js', () => ({
+vi.mock('../src/domain/audio/silentTrack.js', () => ({
   silentStream: vi.fn(() => 'STREAM_SENTINEL'),
   getSilentTrack: vi.fn(() => 'TRACK_SENTINEL'),
   silentContextRunning: vi.fn(() => true),
 }));
 
-import { Mesh, onCrypto } from '../src/webrtc/mesh.js';
-import { silentStream } from '../src/audio/silentTrack.js';
-import { set, state, clearPeers, linkedCount } from '../src/core/state.js';
+import { Mesh, onCrypto } from '../src/domain/mesh/mesh.js';
+import { silentStream } from '../src/domain/audio/silentTrack.js';
+import { set, state, clearPeers, linkedCount } from '../src/domain/state/state.js';
 
 function makeMesh(e2ee = null) {
   const logs = [];
@@ -47,6 +47,10 @@ function fakeCall(peerId, sender) {
     getSenders: () => (sender ? [sender] : []),
     getReceivers: () => [],
     addEventListener(ev, cb) { (pcHandlers[ev] ??= []).push(cb); },
+    removeEventListener(ev, cb) {
+      const list = pcHandlers[ev];
+      if (list) pcHandlers[ev] = list.filter((h) => h !== cb);
+    },
     restartIce: vi.fn(),
   };
   return {
@@ -294,6 +298,137 @@ describe('leg close — stale-event guard (close-identity)', () => {
   });
 });
 
+describe('crypto dataconn close — the cross-browser departure signal', () => {
+  function fakeConn(peerId) {
+    const handlers = {};
+    return {
+      peer: peerId,
+      open: true,
+      handlers,
+      on(ev, cb) { (handlers[ev] ??= []).push(cb); },
+      send: () => {},
+      close: () => {},
+      fire(ev, ...args) { for (const cb of handlers[ev] ?? []) cb(...args); },
+    };
+  }
+
+  it('a closed crypto dataconn tears down the live leg (WebKit remote destroy)', () => {
+    const { mesh } = makeMesh();
+    const call = fakeCall('peer-4', fakeSender());
+    mesh._registerLeg(call, 4, 'listen');
+    const leg = mesh.legs.get('peer-4');
+    clearTimeout(leg._cryptoTimer);
+    const conn = fakeConn('peer-4');
+    mesh._dataConns.set('peer-4', conn);
+    mesh._wireCryptoConn(conn, leg);
+
+    conn.fire('close');                          // remote destroyed itself
+    expect(mesh.legs.has('peer-4')).toBe(false);
+    expect(mesh._dataConns.has('peer-4')).toBe(false);
+    expect(linkedCount()).toBe(0);               // chip + LNK go honest
+    expect(call.close).toHaveBeenCalled();       // the media leg is actually closed
+    mesh.leave();
+  });
+
+  it('the wiring leg only dies while it is still current — a replacement survives', () => {
+    const { mesh, logs } = makeMesh();
+    const conn = fakeConn('peer-9');
+    mesh._dataConns.set('peer-9', conn);
+    const callA = fakeCall('peer-9', fakeSender());
+    mesh._registerLeg(callA, 4, 'listen');
+    mesh._wireCryptoConn(conn, mesh.legs.get('peer-9'));
+    const callB = fakeCall('peer-9', fakeSender());
+    mesh._registerLeg(callB, 4, 'listen');       // same id replaces A
+    mesh._wireCryptoConn(conn, mesh.legs.get('peer-9'));
+
+    conn.fire('close');                          // A's stale listener + B's live listener both run
+    expect(mesh.legs.has('peer-9')).toBe(false); // B dropped exactly once by its own wiring
+    expect(logs.filter(([, m]) => m.includes('LINK DROPPED')).length).toBe(1);
+    mesh.leave();
+  });
+
+  it('a wire-level BYE tears the leg down without any close event', () => {
+    const { mesh } = makeMesh();
+    const call = fakeCall('peer-4', fakeSender());
+    mesh._registerLeg(call, 4, 'listen');
+    const leg = mesh.legs.get('peer-4');
+    clearTimeout(leg._cryptoTimer);
+    const conn = fakeConn('peer-4');
+    mesh._dataConns.set('peer-4', conn);
+    mesh._wireCryptoConn(conn, leg);
+
+    conn.fire('data', { t: 'wlk1-bye' });
+    expect(mesh.legs.has('peer-4')).toBe(false);
+    expect(mesh._dataConns.has('peer-4')).toBe(false);
+    expect(linkedCount()).toBe(0);
+    expect(call.close).toHaveBeenCalled();
+    mesh.leave();
+  });
+
+  it('leave() broadcasts BYE on every open dataconn before closing them', () => {
+    const { mesh } = makeMesh();
+    const call = fakeCall('peer-4', fakeSender());
+    mesh._registerLeg(call, 4, 'listen');
+    clearTimeout(mesh.legs.get('peer-4')._cryptoTimer);
+    const sent = [];
+    const conn = { ...fakeConn('peer-4'), send: (m) => sent.push(m) };
+    mesh._dataConns.set('peer-4', conn);
+    mesh._wireCryptoConn(conn, mesh.legs.get('peer-4'));
+
+    mesh.leave();
+    expect(sent.some((m) => m && m.t === 'wlk1-bye')).toBe(true);
+    expect(mesh.legs.size).toBe(0);
+  });
+});
+
+describe('socket-open wedge recovery — redial seen peers with zero live legs', () => {
+  it('a stranded radio redials its seen peers the moment the signal is back', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    const { mesh } = makeMesh();
+    const prevMax = mesh.cfg.maxSlots;
+    mesh.cfg.maxSlots = 3;
+    try {
+      const live = { id: 'live-mic-stream' };
+      mesh.peer = { destroyed: false, call: vi.fn((id) => fakeCall(id, null)) };
+      mesh.mic = { stream: live };
+      mesh.channel = '22';
+      mesh.slot = 0;
+      mesh._seenPeers.add(2);
+      mesh._dialFails.set(1, 3);                       // parked stays parked
+
+      await mesh._redialSeenPeers();
+
+      expect(mesh.peer.call).toHaveBeenCalledTimes(1); // slot 2 rediscovered
+      expect(mesh.peer.call.mock.calls[0][1]).toBe(live);
+      expect(mesh.legs.size).toBe(1);
+      mesh.leave();
+    } finally {
+      mesh.cfg.maxSlots = prevMax;
+      set({ secret: null });
+    }
+  });
+
+  it('a radio with live legs stays silent (no spray behind an existing link)', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    const { mesh } = makeMesh();
+    try {
+      mesh.peer = { destroyed: false, call: vi.fn() };
+      mesh.mic = { stream: { id: 'live' } };
+      mesh.channel = '22';
+      mesh.slot = 0;
+      mesh._seenPeers.add(2);
+      mesh._registerLeg(fakeCall('peer-2', fakeSender()), 2, 'listen');
+
+      await mesh._redialSeenPeers();
+
+      expect(mesh.peer.call).not.toHaveBeenCalled();
+      mesh.leave();
+    } finally {
+      set({ secret: null });
+    }
+  });
+});
+
 describe('ICE failure mid-TX — redial deferred, drained on endTx', () => {
   it('failed during TX parks the slot in pendingRedial; endTx drains it', () => {
     const { mesh } = makeMesh();
@@ -537,6 +672,7 @@ describe('ghost-redial circuit breaker', () => {
           const call = fakeCall('peer-1', fakeSender());
           mesh._registerLeg(call, 1, 'listen');
           clearTimeout(mesh.legs.get('peer-1')._cryptoTimer);   // silence handshake noise
+          clearTimeout(mesh.legs.get('peer-1')._wireTimer);     // wire-strand timer fires at 8s — not this path
           await vi.advanceTimersByTimeAsync(10_000);            // never-connected fires
         }
       } finally {
@@ -603,6 +739,7 @@ describe('ghost-redial circuit breaker', () => {
       const keepLeg = mesh.legs.get('peer-0');
       clearTimeout(keepLeg._cryptoTimer);
       clearTimeout(keepLeg._neverTimer);
+      clearTimeout(keepLeg._wireTimer);
       keepLeg._neverTimer = undefined;
       mesh._dialFails.set(1, 3);                       // parked dead slot
       const seen = [];

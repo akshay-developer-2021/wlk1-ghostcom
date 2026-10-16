@@ -24,14 +24,11 @@ test('smoke: shell renders with no TypeErrors', async ({ page }) => {
   await expect(page).toHaveTitle(/GHOSTCOM/);
   await expect(page.locator('#shell')).toBeVisible();
 
-  // First-run Join/hint screen: click through when it shows; otherwise the
-  // radio LCD must already be present (auto-joined session).
-  const hint = page.locator('#hint.show');
-  if (await hint.isVisible().catch(() => false)) {
-    await page.locator('#hintGo').click();
-  }
-  await expect(page.locator('#lcd')).toBeVisible();
-  await expect(page.locator('#freq')).toBeVisible();
+  // Fresh profile lands on the Join screen; the radio comes up after a join
+  // (covered by the join-flow test below).
+  await expect(page.locator('#view-join')).toBeVisible();
+  await expect(page.locator('#joinChannel')).toBeVisible();
+  await expect(page.locator('#joinBtn')).toBeVisible();
 
   expect(typeErrors).toEqual([]);
 });

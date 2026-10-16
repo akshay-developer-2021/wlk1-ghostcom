@@ -18,6 +18,7 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # The enforced end-to-end gate.
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -29,4 +30,40 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run build
-      - run: npm run test:e2e -- --project=chromium
+      - run: npm run test:e2e
+
+  # WebKit is enforced too: departed peers tear down via the crypto
+  # DataChannel close (the only signal Safari gives), so the survivor
+  # ledger is honest on the engine real iOS/macOS users bring.
+  e2e-webkit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps webkit
+      - run: npm run build
+      - run: npm run test:e2e:webkit
+
+  # Firefox — first matrix lane. Allowed to fail until one green run
+  # proves the engine end to end; flip it into the enforced set then.
+  e2e-matrix:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [firefox]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      - run: npm run build
+      - run: npm run test:e2e:${{ matrix.browser }}

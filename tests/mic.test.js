@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { MicManager } from '../src/audio/mic.js';
+import { MicManager } from '../src/domain/audio/mic.js';
 
 function fakeTrack(label = 't') {
   const listeners = {};
@@ -149,5 +149,63 @@ describe('MicManager — dead-track recovery (readyState)', () => {
     expect(mm.hot).toBe(false);
     expect(mm.warm).toBe(false);
     expect(mm.generation).not.toBe(gen);              // stale acquires invalidated
+  });
+});
+
+/* bug #2 — warmUp() moves the permission prompt + cold-device wake off
+   press #1 and onto the join. */
+describe('MicManager — join-time warm-up', () => {
+  it('warmUp takes the hardware and lands in the warm window (not hot)', async () => {
+    const { mm, streams } = makeManager();
+    await mm.warmUp();
+    expect(streams).toHaveLength(1);
+    expect(mm.warm).toBe(true);          // muted, hardware alive
+    expect(mm.hot).toBe(false);          // muted: the app must not claim a hot mic
+    expect(mm.stream.getAudioTracks()[0].enabled).toBe(false);
+  });
+
+  it('the press after warmUp resumes warm with no new getUserMedia', async () => {
+    const { mm, streams } = makeManager();
+    await mm.warmUp();
+    const r = await mm.acquire();
+    expect(streams).toHaveLength(1);     // no second hardware grab
+    expect(r.track.enabled).toBe(true);
+    expect(mm.hot).toBe(true);
+  });
+
+  it('warmUp is idempotent — a second call never re-grabs hardware', async () => {
+    const { mm, streams } = makeManager();
+    await mm.warmUp();
+    await mm.warmUp();
+    expect(streams).toHaveLength(1);
+  });
+
+  it('a denied mic never throws — the join survives and press #1 reports it', async () => {
+    const { mm } = makeManager();
+    mm._gum = async () => { throw new Error('NotAllowedError'); };
+    await expect(mm.warmUp()).resolves.toBeUndefined();
+    expect(mm.stream).toBeNull();
+    expect(mm.hot).toBe(false);
+  });
+
+  it('a press already arming is never cancelled by a join-time warm-up', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const { gum, streams } = fakeGum();
+    const mm = new MicManager({ getUserMedia: gum, log: () => {} });
+    const real = gum;
+    mm._gum = async () => { await gate; return real(); };
+
+    /* PTT goes first and is still waiting on hardware */
+    const pressing = mm.acquire();
+    /* the join lands mid-press and tries to warm up */
+    await mm.warmUp();
+    release();
+    const pressed = await pressing;        // must NOT reject with MIC ACQUIRE CANCELLED
+
+    expect(pressed.track.enabled).toBe(true);
+    expect(mm.hot).toBe(true);
+    expect(mm.warm).toBe(false);
+    expect(streams).toHaveLength(1);       // warm-up stood down entirely
   });
 });

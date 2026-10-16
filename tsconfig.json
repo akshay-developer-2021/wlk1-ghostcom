@@ -7,8 +7,8 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
-    "types": ["vite/client"],
+    "types": ["vite/client", "node",],
     "skipLibCheck": true
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests", "e2e", "playwright.config.ts"]
 }

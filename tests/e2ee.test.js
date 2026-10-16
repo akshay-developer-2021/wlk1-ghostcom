@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { Worker } from 'node:worker_threads';
 import { webcrypto } from 'node:crypto';
-import { WORKER_SRC } from '../src/security/e2ee.js';
+import { WORKER_SRC } from '../src/domain/security/e2ee.js';
 
 /* Regression harness for the E2EE frame worker (src/security/e2ee.ts).
    WORKER_SRC runs VERBATIM inside node:worker_threads. A prelude maps the
@@ -62,14 +62,38 @@ parentPort.on('message', (d) => {
     })();
     return;
   }
+  /* Drive the REAL browser entry point with an event shaped like the ones
+     Chromium and WebKit actually deliver: {transformer}, no options. */
+  if (d.type === 't-rtc-transform') {
+    (async () => {
+      try {
+        const inputs = Array.isArray(d.bufs) ? d.bufs : [];
+        const outputs = [];
+        const event = {
+          transformer: {
+            readable: new ReadableStream({
+              start(c) { for (const b of inputs) c.enqueue({ data: b }); c.close(); },
+            }),
+            writable: new WritableStream({ write(frame) { outputs.push(frame.data); } }),
+          },
+        };
+        await self.onrtctransform(event);
+        await new Promise((r) => setTimeout(r, 60));
+        parentPort.postMessage({ type: 't-rtc-ok', id: d.id, count: outputs.length, bufs: outputs });
+      } catch (e) {
+        parentPort.postMessage({ type: 't-rtc-err', id: d.id, message: String((e && e.message) || e) });
+      }
+    })();
+    return;
+  }
 });
 `;
 
 const workers = [];
 let nextId = 1;
 
-function spawn() {
-  const w = new Worker(PRELUDE + WORKER_SRC + EPILOGUE, { eval: true });
+function spawn(direction = 'encrypt') {
+  const w = new Worker(PRELUDE + WORKER_SRC(direction) + EPILOGUE, { eval: true });
   workers.push(w);
   /* Behavior assertions (not crashes) are the signal; a dead worker
      surfaces as an rpc timeout below instead of killing the run. */
@@ -249,5 +273,60 @@ describe('E2EE worker — frame crypto (WORKER_SRC)', () => {
     } finally {
       w.off('message', onMsg);
     }
+  });
+});
+
+/* The bug this pins: RTCRtpScriptTransformEvent exposes ONLY `transformer`
+   in Chromium and WebKit — no `options` property at all. A worker reading
+   `event.options.direction` therefore got `undefined`, matched neither the
+   encrypt nor the decrypt branch, and dropped EVERY frame while the UI
+   still claimed E2EE was armed. Measured cross-engine before the fix:
+   drops climbing 266→1240 with encCount=0 and decCount=0. */
+describe('E2EE worker — the real onrtctransform entry point', () => {
+  const rtc = (w, bufs) => rpc(w, { type: 't-rtc-transform', bufs }, 't-rtc-ok');
+
+  it('encrypt worker passes frames through an event with NO options', async () => {
+    const w = spawn('encrypt');
+    await initWorker(w, randomKey());
+    const res = await rtc(w, [randomFrame(32).buffer, randomFrame(48).buffer]);
+    expect(res.type).toBe('t-rtc-ok');
+    expect(res.count).toBe(2);
+    const stats = await getStats(w);
+    expect(stats.drops).toBe(0);
+    expect(stats.encCount).toBe(2);
+  });
+
+  it('decrypt worker passes frames through an event with NO options', async () => {
+    const w = spawn('decrypt');
+    await initWorker(w, randomKey());
+    const plain = randomFrame(32);
+    const sealed = await rpc(w, { type: 't-encrypt', buf: plain.buffer }, 't-encrypt-ok');
+    const res = await rtc(w, [sealed.buf]);
+    expect(res.type).toBe('t-rtc-ok');
+    expect(new Uint8Array(res.bufs[0])).toEqual(plain);
+    const stats = await getStats(w);
+    expect(stats.drops).toBe(0);
+    expect(stats.decCount).toBe(1);
+  });
+
+  it('direction is baked in: enc worker seals, dec worker opens, neither falls back', async () => {
+    const enc = spawn('encrypt');
+    const dec = spawn('decrypt');
+    const key = randomKey();
+    await initWorker(enc, key);
+    await initWorker(dec, key);
+
+    const plain = randomFrame(64);
+    const sealed = await rtc(enc, [plain.buffer]);
+    expect(sealed.count).toBe(1);
+    expect(sealed.bufs[0].byteLength).toBe(64 + 28);   // IV + GCM tag
+
+    const opened = await rtc(dec, [sealed.bufs[0]]);
+    expect(new Uint8Array(opened.bufs[0])).toEqual(plain);
+
+    /* a decrypt worker fed plaintext fails closed rather than passing it on */
+    const wrong = await rtc(dec, [new Uint8Array(64).buffer]);
+    expect(wrong.count).toBe(0);
+    expect((await getStats(dec)).drops).toBe(1);
   });
 });

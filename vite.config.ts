@@ -59,7 +59,7 @@ export default mergeConfig(
       environment: 'node',
       globals: true,
       include: ['tests/**/*.test.js'],
-      coverage: { provider: 'v8', include: ['src/core/**', 'src/audio/**', 'src/webrtc/**', 'src/security/**'] },
+      coverage: { provider: 'v8', include: ['src/domain/**', 'src/app/**'] },
     },
   }),
 );

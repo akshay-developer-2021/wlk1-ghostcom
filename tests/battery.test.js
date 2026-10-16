@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { PowerManager, onVisibilityChange } from '../src/core/battery.js';
-import { state, set } from '../src/core/state.js';
+import { PowerManager, onVisibilityChange } from '../src/domain/battery.js';
+import { state, set } from '../src/domain/state/state.js';
 
 /* No DOM needed — PowerManager takes explicit refs, so every browser
    surface (document, navigator, battery) is a hand-rolled fake. */

@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { state, set, setPeer, removePeer, clearPeers, on, linkedSlots } from '../src/core/state.js';
+import { state, set, setPeer, removePeer, clearPeers, on, linkedSlots } from '../src/domain/state/state.js';
 
 beforeEach(() => {
   /* reset module state between tests */
   clearPeers();
-  set({ channel: null, secret: null, mySlot: -1, joined: false, tx: false, micHot: false, powerSave: false, sas: null });
+  set({ channel: null, secret: null, joined: false, tx: false, micHot: false, powerSave: false, sas: null });
 });
 
 describe('state store', () => {

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 // KDF only — never main.ts (side-effectful on import).
 import {
   deriveSecretFromPassphrase, bytesToSecret, passphraseSalt,
-} from '../src/core/crypto.js';
+} from '../src/domain/crypto/crypto.js';
 
 const WORDS = 'correct horse battery staple';
 const CROCKFORD = /^[0123456789ABCDEFGHJKMNPQRSTVWXYZ]+$/;

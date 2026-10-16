@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   generateRoomSecret, isValidRoomSecret, normalizeRoomSecret, slotPeerId, callerSlot,
   sasCode, parseChannelHash, buildShareLink,
-} from '../src/core/crypto.js';
+} from '../src/domain/crypto/crypto.js';
 
 describe('room secrets', () => {
   it('generates valid Crockford base32 secrets', () => {

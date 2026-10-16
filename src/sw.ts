@@ -33,7 +33,8 @@ declare const self: SwGlobalScope;
    Network-first for navigation (fresh app), cache-first for assets. */
 // bump on breaking cache changes
 const CACHE_VERSION = 'v2';
-const CACHE = `wlk1-${CACHE_VERSION}`;
+const CACHE_PREFIX = 'wlk1-';
+const CACHE = `${CACHE_PREFIX}${CACHE_VERSION}`;
 const RUNTIME_CAP = 60;
 const ASSETS: string[] = ['/'];
 
@@ -61,7 +62,15 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))))
+      /* Prune only stale versions of OUR cache. Workbox's precache lives
+         under its own name and owns its own cleanup; deleting every cache
+         that is not ours wipes the precache precacheAndRoute() just
+         installed and breaks offline. */
+      .then((keys) => Promise.all(
+        keys
+          .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE)
+          .map((key) => caches.delete(key)),
+      ))
       .then(() => self.clients.claim()),
   );
 });
