@@ -12,6 +12,7 @@
 import { state, on } from '../../domain/state/state.js';
 import type { PeerInfo } from '../../domain/state/state.js';
 import { setLed, setSync } from '../../infra/dom/dom.js';
+import { syncLinkText } from '../../ui/components/lcd.js';
 
 /** Minimal structural surface the loop needs from the sfx module. */
 export interface LoopSfx {
@@ -48,6 +49,7 @@ export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
   const chipCache = new Map<number, Element | null>(); // slot -> element
   const declaredSpeaking = new Map<number, boolean>(); // slot -> peer-reported PTT
   let rafOn = false, lastFrame = 0, lastActivity = 0;
+  let anySpeechLastTick = false;
   let idleTimer: ReturnType<typeof setInterval> | null = null;
 
   on('peers', (v: unknown) => {
@@ -143,6 +145,9 @@ export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
     if (ts - lastFrame >= step) {
       lastFrame = ts;
       let anySpeech = false;
+      /* was the banner ours (RX/TX) on the previous tick? decides whether
+         the line is handed back to the link text now */
+      const wasTalking = anySpeechLastTick || state.tx;
 
       if (txAnalyser && txData) {
         txAnalyser.getByteFrequencyData(txData);
@@ -159,9 +164,14 @@ export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
       }
 
       for (const [slot, o] of remotes) {
-        const talk = hasEnergy(o.an, o.data) || declaredSpeaking.get(slot) === true;
+        /* RX indication must be evidence of received energy, not a remote
+           claim: `declaredSpeaking` is an unauthenticated assertion over
+           the data channel and could strobe the LED and banner with no
+           audio on the wire. It still drives the chip class below. */
+        const talk = hasEnergy(o.an, o.data);
+        const claimed = declaredSpeaking.get(slot) === true;
         const chip = chipCache.get(slot) ?? document.querySelector(`.chip[data-slot="${slot}"]`);
-        if (chip) chip.classList.toggle('speaking', talk);
+        if (chip) chip.classList.toggle('speaking', talk || claimed);
         if (talk) anySpeech = true;
       }
 
@@ -169,7 +179,12 @@ export function createLoop({ sfx, onSuspend }: LoopOptions): RenderLoop {
       if (anySpeech) { lastActivity = ts; setSync('▼ RX ← UNIT SPEAKING', 'on'); }
       else if (state.tx && typeof state.channel === 'string') {
         setSync(`▲ TX → CH ${state.channel} • SQUELCH OPEN`, 'tx');
+      } else if (wasTalking) {
+        /* traffic stopped — hand the banner back to the link text, or it
+           sticks on the last RX/TX message and hides the real link state */
+        syncLinkText();
       }
+      anySpeechLastTick = anySpeech || state.tx;
       if (performance.now() - lastActivity > IDLE_MS) idle();
     }
     if (rafOn) requestAnimationFrame(frame);

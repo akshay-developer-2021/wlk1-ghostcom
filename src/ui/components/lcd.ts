@@ -85,8 +85,11 @@ onQuality((q: number) => {
 
 /* ── link lifecycle text ────────────────────────────────── */
 /* Derived from all three: a broker reconnect must not downgrade the banner
-   while the leg is live, and a lone unit on the channel is not a link. */
-function syncLinkText(): void {
+   while the leg is live, and a lone unit on the channel is not a link.
+   Exported: voice-loop owns the RX/TX banner and hands the line back
+   through here when traffic stops, so exactly one writer owns it at a
+   time instead of the two clobbering each other. */
+export function syncLinkText(): void {
   if (state.joined && linkedCount() > 0) setSync('LINK ESTABLISHED — LISTENING', 'on');
   else if (state.joined) setSync('ON CHANNEL — NO OTHER UNITS', 'warn');
   else if (state.connected) setSync('BROKER CONNECTED — LINKING…', 'on');
