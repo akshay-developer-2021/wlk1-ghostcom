@@ -866,3 +866,78 @@ describe('seen faces follow room identity (channel+secret)', () => {
     }
   });
 });
+
+/* Cross-browser symptom: Brave ↔ Firefox legs looped
+   `E2EE UNAVAILABLE (handshake timeout)` → `WIRE NEVER-OPENED — REDIAL`
+   forever because BOTH sides dialed a DataChannel over the same peer
+   connection and the mirror clobbered the map entry. Exactly one side —
+   the media dialer — may connect. */
+describe('DataChannel ownership (single dialer per leg pair)', () => {
+  function fakeConn(peerId) {
+    const handlers = {};
+    return {
+      peer: peerId, open: false, sent: [], closed: false,
+      send(d) { this.sent.push(d); },
+      close() { this.closed = true; this.open = false; },
+      on(ev, cb) { (handlers[ev] ??= []).push(cb); return this; },
+      fire(ev, ...args) { for (const cb of handlers[ev] ?? []) cb(...args); },
+    };
+  }
+
+  it('the leg owner dials exactly one channel', () => {
+    const { mesh } = makeMesh();
+    const dc = fakeConn('peer-4');
+    mesh.peer = { ...fakePeer(), connect: vi.fn(() => dc) };
+    mesh._registerLeg(fakeCall('peer-4', fakeSender()), 4, 'listen');
+    expect(mesh.peer.connect).toHaveBeenCalledTimes(1);
+    expect(mesh._dataConns.get('peer-4')).toBe(dc);
+    mesh.leave();
+  });
+
+  it('the answered side never dials — it waits for the inbound channel', () => {
+    const { mesh } = makeMesh();
+    mesh.peer = { ...fakePeer(), connect: vi.fn(() => fakeConn('peer-4')) };
+    const call = fakeCall('peer-4', fakeSender());
+    mesh._registerLeg(call, 4, 'listen', false);       // inbound leg → not owner
+    expect(mesh.peer.connect).not.toHaveBeenCalled();
+    /* its timers stay armed while it waits for the owner to dial */
+    const leg = mesh.legs.get('peer-4');
+    expect(leg._cryptoTimer).toBeDefined();
+    expect(leg._wireTimer).toBeDefined();
+
+    const dc = fakeConn('peer-4');
+    mesh._onDataConn(dc);
+    dc.fire('open');
+    expect(leg._wireOpen).toBe(true);
+    expect(dc.sent[0]).toMatchObject({ t: 'wlk1-hello' });
+    dc.fire('data', { t: 'wlk1-ack', e2ee: false });    // handshake completes
+    expect(leg.crypto).toBe(false);                    // honest: no transforms
+    mesh.leave();
+  });
+
+  it('a mirror-dial inbound is closed — our own channel survives', () => {
+    const { mesh } = makeMesh();
+    const ours = fakeConn('peer-4');
+    mesh.peer = { ...fakePeer(), connect: vi.fn(() => ours) };
+    mesh._registerLeg(fakeCall('peer-4', fakeSender()), 4, 'listen');
+
+    const mirror = fakeConn('peer-4');
+    mesh._onDataConn(mirror);                          // peer dialed back
+    expect(mirror.closed).toBe(true);                  // duplicate dies
+    expect(mesh._dataConns.get('peer-4')).toBe(ours);  // ours kept
+    expect(ours.closed).toBe(false);
+    mesh.leave();
+  });
+
+  it('the owner adopts an inbound channel instead of dialing over it', () => {
+    const { mesh } = makeMesh();
+    mesh.peer = { ...fakePeer(), connect: vi.fn(() => fakeConn('peer-4')) };
+    const dc = fakeConn('peer-4');
+    mesh._dataConns.set('peer-4', dc);                  // landed first (glare)
+    mesh._registerLeg(fakeCall('peer-4', fakeSender()), 4, 'listen');
+    expect(mesh.peer.connect).not.toHaveBeenCalled();   // no second channel
+    dc.fire('open');
+    expect(mesh.legs.get('peer-4')._wireOpen).toBe(true);
+    mesh.leave();
+  });
+});

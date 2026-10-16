@@ -24,7 +24,7 @@ import type { Sfx } from '../audio/sfx.js';
 import type { E2EE } from '../security/e2ee.js';
 import type { LogKind } from '../../infra/dom/dom.js';
 
-export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mode: 'live'|'listen'; crypto: boolean|null; recvonly?: boolean; _cryptoTimer?: any; _misses?: number; _neverTimer?: any; _wireTimer?: any; _wireOpen?: boolean; _sasDone?: boolean; _sasListeners?: { ice: (() => void) | null; conn: (() => void) | null } }
+export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mode: 'live'|'listen'; crypto: boolean|null; dcOwner?: boolean; recvonly?: boolean; _cryptoTimer?: any; _misses?: number; _neverTimer?: any; _wireTimer?: any; _wireOpen?: boolean; _sasDone?: boolean; _sasListeners?: { ice: (() => void) | null; conn: (() => void) | null } }
 
 export interface TxReport { attached: number; redialed: number }
 
@@ -68,7 +68,8 @@ export class Mesh {
   private _visibilityHandler: (() => void) | null = null;
   private _qualityHistory: number[] = [];
   private _txGen = 0;
-  private _dataConns = new Map<string, DataConnection>();      // peerId -> crypto-negotiation DataConnection
+  private _dataConns = new Map<string, DataConnection>();      // peerId -> crypto-negotiation DataChannel
+  private _ourDials = new WeakSet<DataConnection>();          // channels WE opened (vs received)
 
   constructor({ sfx = null, mic = null, e2ee = null, log = () => {}, config = CONFIG }: MeshOptions = {}) {
     this.sfx = sfx;
@@ -494,7 +495,7 @@ export class Mesh {
         try { call.close(); } catch { /* noop */ }
         return;
       }
-      const leg = this._registerLeg(call, slot, liveMic ? 'live' : 'listen');
+      const leg = this._registerLeg(call, slot, liveMic ? 'live' : 'listen', false);
       if (recvonly) leg.recvonly = true;
       this.log(`LINK ESTABLISHED — UNIT-${slot}`, 'rx');
       this.sfx?.linkOpen();
@@ -504,7 +505,11 @@ export class Mesh {
     });
   }
 
-  _registerLeg(call: any, slot: number, mode: 'live' | 'listen'): Leg {
+  /* dcOwner: this side initiated the media call, so it — and only it —
+     dials the crypto DataChannel. A mutual connect() over one peer
+     connection deadlocks SCTP (neither channel opens), which showed up
+     cross-browser as a permanent E2EE-handshake-timeout / redial loop. */
+  _registerLeg(call: any, slot: number, mode: 'live' | 'listen', dcOwner = true): Leg {
     const id = call.peer as string;
     /* orphan kill: a redial/replace must never leave two live
        PeerConnections for the same peer — close the stale one first. */
@@ -515,7 +520,7 @@ export class Mesh {
       clearTimeout(prev._neverTimer);
       try { clearTimeout((prev.call as any)?.__wlkDiscTimer); } catch { /* noop */ }
     }
-    const leg: Leg = { call, slot, mode, crypto: null };   // null=pending handshake
+    const leg: Leg = { call, slot, mode, crypto: null, dcOwner };   // null=pending handshake
     this.legs.set(id, leg);
     this.knownOccupied.add(slot);
     /* _seenPeers tracks only slots with PROVEN media — prevents phantom
@@ -634,25 +639,34 @@ export class Mesh {
   _negotiateCrypto(call: any, leg: Leg): void {
     leg._cryptoTimer = setTimeout(() => this._settleCrypto(leg, false, 'handshake timeout'), 3000);
     let conn: DataConnection | undefined = this._dataConns.get(call.peer);
-    /* reuse only a live channel — a dead mapping must not pin the leg
-       to a handshake that can never complete. */
-    if (conn && !(conn as unknown as { open?: boolean }).open) {
+    /* Reuse only what can still complete: an unopened channel WE dialed is
+       dead hardware (adopt it and the handshake hangs forever), while an
+       unopened channel we RECEIVED is this non-owner's own channel still
+       arriving — that one is adopted either way. */
+    if (conn && this._ourDials.has(conn) && !(conn as unknown as { open?: boolean }).open) {
       try { conn.close(); } catch { /* noop */ }
       if (this._dataConns.get(call.peer) === conn) this._dataConns.delete(call.peer);
       conn = undefined;
     }
-    if (!conn && this.peer && !this.peer.destroyed && !this._destroyed) {
+    if (!conn && leg.dcOwner && this.peer && !this.peer.destroyed && !this._destroyed) {
       try {
         const dc = this.peer.connect(call.peer, { serialization: 'json', reliable: true });
         if (dc) {
           this._dataConns.set(call.peer, dc);
+          this._ourDials.add(dc);
           conn = dc;
           this.log(`DC DIAL — UNIT-${leg.slot}`, 'sys');
         } else this.log(`DC DIAL FAILED — UNIT-${leg.slot}`, 'warn');
       } catch { conn = undefined; }
     }
+    /* Exactly ONE side owns the crypto channel per leg pair: the side that
+       dialed the media. The non-owner never connects — it waits for the
+       inbound channel (_onDataConn). Simultaneous connect() on both sides
+       deadlocks SCTP: neither channel opens, the hello/ack never lands,
+       and every redial repeats the collision (cross-browser symptom:
+       E2EE handshake timeout + WIRE NEVER-OPENED loop). */
     if (conn) this._wireCryptoConn(conn, leg);
-    else { clearTimeout(leg._cryptoTimer); this._settleCrypto(leg, false, 'no data channel'); }
+    else if (leg.dcOwner) { clearTimeout(leg._cryptoTimer); this._settleCrypto(leg, false, 'no data channel'); }
 
     /* Wire-strand: a leg whose crypto channel never OPENED cannot carry
        BYE/handshake/closes — on engines where the dc builds late (WebKit),
@@ -754,7 +768,14 @@ export class Mesh {
     this.log(`DC INBOUND — ${conn.peer}`, 'sys');
     const leg = this.legs.get(conn.peer);
     const prev = this._dataConns.get(conn.peer);
-    if (prev && prev !== conn) { try { prev.close(); } catch { /* noop */ } }
+    /* A mirror-dial arrived while we already own (or await) our channel:
+       keep OURS and close the duplicate. Adopting the inbound orphaned
+       the channel that was actually opening — the handshake never settled
+       and the leg redialed forever. */
+    if (prev && prev !== conn) {
+      try { conn.close(); } catch { /* noop */ }
+      return;
+    }
     this._dataConns.set(conn.peer, conn);
     if (leg) {
       this._wireCryptoConn(conn, leg);
