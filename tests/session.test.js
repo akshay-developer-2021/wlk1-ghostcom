@@ -192,3 +192,37 @@ describe('SessionService', () => {
     expect(calls.micRelease).toBe(1);
   });
 });
+/* Regression (audit): runJoin applied its result unconditionally. A user
+   who left while the join was still awaiting the broker got a GHOST
+   SESSION — the stale join re-persisted the key, restarted polling,
+   rewrote the URL back to the abandoned room and landed on 'joined'. */
+describe('join generation guard', () => {
+  it('a join that loses the race to leave() must not resurrect the session', async () => {
+    const { deps, calls } = makeDeps();
+    let releaseJoin;
+    deps.mesh.join = vi.fn(() => new Promise((res) => { releaseJoin = () => res({ ok: true, slot: 0 }); }));
+    const session = new SessionService(deps);
+
+    const joining = session.initFromHash('22', SECRET);
+    await new Promise((r) => setTimeout(r, 5));     // join is in flight
+    await session.leave();                           // user backs out
+    releaseJoin();                                  // the broker finally answers
+    expect(await joining).toBe(false);
+
+    expect(session.getState().phase).not.toBe('joined');
+    expect(calls.hashes).toHaveLength(0);            // URL NOT rewritten back
+  });
+
+  it('leaving mid-join still returns the app to idle', async () => {
+    const { deps } = makeDeps();
+    let releaseJoin;
+    deps.mesh.join = vi.fn(() => new Promise((res) => { releaseJoin = () => res({ ok: true, slot: 0 }); }));
+    const session = new SessionService(deps);
+    void session.initFromHash('22', SECRET);
+    await new Promise((r) => setTimeout(r, 5));
+    await session.leave();
+    releaseJoin();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(session.getState().phase).toBe('idle');
+  });
+});

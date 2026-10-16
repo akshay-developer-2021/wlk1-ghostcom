@@ -31,6 +31,7 @@ export class SessionService {
   private deps: SessionDeps;
   private e2eeInstance: E2eeInstance | null = null;
   private hintShown = false;
+  private gen = 0;                 // join generation — see runJoin
   private listeners: Set<(state: SessionState) => void> = new Set();
 
   constructor(deps: SessionDeps) {
@@ -115,14 +116,23 @@ export class SessionService {
 
   private async runJoin(): Promise<boolean> {
     const { channel, secret } = this.state;
+    /* Generation guard. Every leave/new-join bumps it, so a join that is
+       still awaiting the broker when the user leaves (or starts another
+       room) must NOT apply its result: that re-persists the key, restarts
+       polling, rewrites the URL back to the abandoned room and lands the
+       phase on 'joined' — a ghost session on a room nobody is in. */
+    const gen = ++this.gen;
+    const stale = (): boolean => gen !== this.gen;
     /* mirror into global state BEFORE mesh.join — the mesh reads
        state.secret for the room identity and aborts NO SECRET otherwise */
     set({ channel, secret });
 
     await this.rekeyE2EE();
+    if (stale()) return false;
     this.deps.ui.showScreen('radio');
 
     const [nextState, effects] = await executeJoin(this.state, this.deps.mesh);
+    if (stale()) return false;
 
     if (effects.persist) {
       this.deps.storage.set('wlk1-ch', effects.persist.channel);
@@ -146,6 +156,8 @@ export class SessionService {
   }
 
   async leave(): Promise<void> {
+    /* Invalidate any join still in flight — its result must not land. */
+    this.gen++;
     const [nextState, effects] = executeLeave(this.state);
     if (effects.stopQualityPolling) this.deps.mesh.stopQualityPolling();
     if (effects.meshLeave) this.deps.mesh.leave();

@@ -159,6 +159,13 @@ const ptt = createPTT({
   onTxEnd: () => loop.clearTx(),
 });
 
+/* Leaving a room mid-transmission must shut the TX down: otherwise
+   state.tx stays true, the button stays latched and the next press is
+   swallowed, with the mic hardware already released underneath. */
+session.subscribe((s) => {
+  if (s.phase === 'idle') ptt.forceRelease();
+});
+
 /* ── power ──────────────────────────────────────────────────── */
 power.init();
 power.onBattery((level, charging) => {

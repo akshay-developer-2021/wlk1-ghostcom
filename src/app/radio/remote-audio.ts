@@ -45,6 +45,9 @@ export function initRemoteAudio({ sfx, loop, getVolume }: RemoteAudioDeps): Remo
 
   const sinks = new Map<number, HTMLAudioElement>();
   const sinkTaps = new Map<number, { an: AnalyserNode; src: AudioNode }>();
+  /** Slots whose frames must never reach the speakers: crypto is still
+      null (handshake un-settled → raw AES-GCM) or false (plain SRTP). */
+  const cryptoBlocked = new Set<number>();
   let sharedGain: GainNode | null = null;
   let unmuteHinted = false;
 
@@ -73,8 +76,13 @@ export function initRemoteAudio({ sfx, loop, getVolume }: RemoteAudioDeps): Remo
       }
     }
     if (!routed) {
-      el.muted = false;
-      el.volume = clamp01(getVolume());
+      /* NEVER play a leg whose decrypt transform is not attached: the
+         inbound frames are raw AES-GCM (crypto null) or cleartext (false)
+         and the Opus decoder turns them into broadband screech. This gate
+         is authoritative — routeSink and replayAudio both write `muted`,
+         so every writer must go through here. */
+      el.muted = cryptoBlocked.has(slot);
+      if (!el.muted) el.volume = clamp01(getVolume());
     }
   }
 
@@ -104,6 +112,9 @@ export function initRemoteAudio({ sfx, loop, getVolume }: RemoteAudioDeps): Remo
          only when the stream itself was swapped */
       if (el.srcObject !== stream) {
         el.srcObject = stream;
+        /* Keep the playback gate authoritative across every path that
+           writes `muted` (this block, routeSink, replayAudio). */
+        if (p.crypto === true) cryptoBlocked.delete(slot); else cryptoBlocked.add(slot);
         el.play().catch(() => {
           /* say it once — a locked context would otherwise re-toast on every
              reconnect and bury the screen in identical warnings */
@@ -117,12 +128,16 @@ export function initRemoteAudio({ sfx, loop, getVolume }: RemoteAudioDeps): Remo
           loop.registerRemote(slot, tap.an, tap.src);
         }
         routeSink(slot, el);
+      } else if (p.crypto === true ? cryptoBlocked.delete(slot) : cryptoBlocked.add(slot)) {
+        /* crypto settled after the stream landed — (un)mute accordingly */
+        routeSink(slot, el);
       }
     }
     for (const [slot, el] of sinks) {              // slots gone or unlinked
       if (!peers.get(slot)?.linked) {
         el.remove();
         sinks.delete(slot);
+        cryptoBlocked.delete(slot);
         sinkTaps.delete(slot);
         loop.unregisterRemote(slot);
       }

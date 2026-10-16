@@ -915,7 +915,7 @@ describe('DataChannel ownership (single dialer per leg pair)', () => {
     mesh.leave();
   });
 
-  it('a mirror-dial inbound is closed — our own channel survives', () => {
+  it('a competing channel never wins by arriving first — the opener wins', () => {
     const { mesh } = makeMesh();
     const ours = fakeConn('peer-4');
     mesh.peer = { ...fakePeer(), connect: vi.fn(() => ours) };
@@ -923,9 +923,16 @@ describe('DataChannel ownership (single dialer per leg pair)', () => {
 
     const mirror = fakeConn('peer-4');
     mesh._onDataConn(mirror);                          // peer dialed back
-    expect(mirror.closed).toBe(true);                  // duplicate dies
-    expect(mesh._dataConns.get('peer-4')).toBe(ours);  // ours kept
+    /* NEITHER is closed yet: on WebKit the self-dial never opens, so
+       closing on arrival kills the only working channel. */
+    expect(mirror.closed).toBe(false);
     expect(ours.closed).toBe(false);
+
+    mirror.open = true;
+    mirror.fire('open');                               // the one that opened
+    expect(mirror.closed).toBe(false);                 // promoted
+    expect(ours.closed).toBe(true);                    // loser closed
+    expect(mesh._dataConns.get('peer-4')).toBe(mirror);
     mesh.leave();
   });
 

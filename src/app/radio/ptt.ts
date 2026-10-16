@@ -118,6 +118,9 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, 
       }, config.maxTxMs);
     } catch (err) {
       if (gen !== token) return abortArming(gen);   // cancelled mid-arm — teardown, no error UI
+      /* The arm failed AFTER the mic may already be hot (no track, or
+         beginTx threw/hung) — release it here or the hardware stays
+         capturing with no TX and no button to stop it. */
       resetGesture();
       setSync('MIC BLOCKED — CHECK LOCK ICON', 'warn');
       log(`TX FAIL — ${(err as Error)?.message ?? err}`, 'warn');
@@ -143,8 +146,15 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, 
     pressed = false;
   }
 
-  /** Full gesture reset with no TX teardown — the arm never completed. */
+  /** Full gesture reset — the arm never completed, but the mic may
+      already be hot and a sender may already carry it. Always hand the
+      hardware back here; this is the last stop on every failure path. */
   function resetGesture(): void {
+    try { mesh.endTx(); } catch { /* best-effort — must not throw */ }
+    try { mic.release(); } catch { /* best-effort — must not throw */ }
+    set({ micHot: false });
+    setMicLed(false);
+    try { onTxEnd?.(); } catch { /* noop */ }
     holders.clear();
     pressed = false;
     btn.classList.remove('pressed');
@@ -267,5 +277,8 @@ export function createPTT({ mesh, mic, sfx, power, config, onAnalyser, onTxEnd, 
   });
   window.addEventListener('blur', () => forceRelease());
 
-  return { press, release, get isPressed() { return pressed; } };
+  /* forceRelease is exposed so the session can shut a live TX down when the
+     user leaves mid-transmission — otherwise state.tx stays true, the
+     button stays latched and the next press is swallowed. */
+  return { press, release, forceRelease, get isPressed() { return pressed; } };
 }

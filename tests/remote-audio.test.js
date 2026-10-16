@@ -106,7 +106,7 @@ describe('remote audio sink', () => {
     const prevCtx = deps.sfx.ctx;
     deps.sfx.ctx = Object.assign(Object.create(Object.getPrototypeOf(prevCtx)), prevCtx, runs);
     try {
-      setPeer(2, { linked: true, stream: stream('s2') });
+      setPeer(2, { linked: true, stream: stream('s2'), crypto: true });
       expect(taps.registered.length).toBe(tapsBefore + 1);    // analyser unchanged
       expect(runs.createGain).toHaveBeenCalled();
       expect(sinks().at(-1).muted).toBe(true);                // the graph owns loudness
@@ -121,5 +121,42 @@ describe('remote audio sink', () => {
     mod.replayAudio();
     expect(sinks().at(-1).muted).toBe(false);
     expect(sinks().at(-1).volume).toBe(0.5);
+  });
+});
+/* Regression: two browsers on one machine reported broadband screech with
+   no PTT. Cause — the sink played an inbound stream before the decrypt
+   transform was attached, so raw AES-GCM hit the Opus decoder. A leg may
+   only reach the speakers once its crypto has settled TRUE. */
+describe('playback gate — never play un-decrypted frames', () => {
+  it('mutes a leg whose crypto handshake has not settled', () => {
+    setPeer(4, { linked: true, stream: stream('s4'), crypto: null });
+    expect(sinks()).toHaveLength(1);
+    expect(sinks()[0].muted).toBe(true);
+  });
+
+  it('mutes a leg that negotiated plain SRTP', () => {
+    setPeer(5, { linked: true, stream: stream('s5'), crypto: false });
+    expect(sinks()[0].muted).toBe(true);
+  });
+
+  it('unmutes once crypto settles true, without rebuilding the tap', () => {
+    setPeer(6, { linked: true, stream: stream('s6'), crypto: null });
+    const before = taps.registered.length;
+    expect(sinks()[0].muted).toBe(true);
+    setPeer(6, { crypto: true });                 // handshake landed
+    expect(sinks()[0].muted).toBe(false);
+    expect(taps.registered.length).toBe(before);  // same stream — no re-tap
+  });
+
+  it('replayAudio cannot unmute a blocked leg', () => {
+    setPeer(7, { linked: true, stream: stream('s7'), crypto: null });
+    sinks()[0].playImpl = () => Promise.resolve();
+    mod.replayAudio();                            // would force muted=false
+    expect(sinks()[0].muted).toBe(true);
+  });
+
+  it('a stream with no crypto field at all stays blocked (fail closed)', () => {
+    setPeer(8, { linked: true, stream: stream('s8') });
+    expect(sinks()[0].muted).toBe(true);
   });
 });

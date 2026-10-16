@@ -28,6 +28,10 @@ export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mod
 
 export interface TxReport { attached: number; redialed: number }
 
+/* How many exhausted reconnect chains we tolerate before stopping and
+   waiting for the user. Without a ceiling the outage loop is endless. */
+const MAX_OUTAGE_GENERATIONS = 3;
+
 export interface JoinResult { ok: boolean; reason?: string; slot?: number }
 
 export interface MeshOptions {
@@ -59,7 +63,13 @@ export class Mesh {
   private _dialFails = new Map<number, number>(); // slot -> consecutive transport failures (never-connected / ICE / dead dial)
   private _joinMutex: Promise<JoinResult | undefined> | null = null;
   private _rejoinInFlight: Promise<void> | null = null;
-  private _reconnectChain = false; // single-flight broker reconnect loop
+  /* The Peer that owns the running reconnect chain. Scoping the flag to
+     its owner is what keeps a stale chain's timer from clearing a live
+     chain's flag and letting a second chain start. */
+  private _reconnectPeer: Peer | null = null;
+  private _reconnectTries = 0;      // survives rejoin generations — see 'disconnected'
+  private _outageGenerations = 0;  // exhausted chains since the last successful open
+  private _joinGen = 0;          // join generation — stale probes must not dial
   private _destroyed = false;
   private _sasPrints = new Map<string, Set<string>>();
   private _watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -114,6 +124,12 @@ export class Mesh {
     const prevChannel = this.channel;
     const prevSecret = this._roomSecret;
     this.leave();
+    /* Join generation. The probe ladder below is staggered over ~1s; a
+       leave() (or another join) during that window must stop the remaining
+       probes from opening fresh broker sockets — on a throttled broker
+       that burst is what earns the 429 that caused the leave. Captured
+       AFTER our own leave() so we do not invalidate ourselves. */
+    const gen = this._joinGen;
     /* New room (channel OR secret changed) → forget old faces, or a
        fresh-key manual join inherits strangers and sweeps them forever.
        Same-room rejoin keeps them: the rejoiner is exactly who the
@@ -180,8 +196,12 @@ export class Mesh {
         await new Promise<void>((r) => setTimeout(r, i * 150));
         /* first-open-wins: a settled claim means our socket is up —
            don't open (and then destroy) another broker socket. This is
-           what used to spray "WebSocket closed before established". */
-        if (claimed) return { slot: i, result: 'dropped' };
+           what used to spray "WebSocket closed before established".
+           The destroy check is the same guard for the OTHER direction:
+           a user who left during the stagger must not have the remaining
+           probes open fresh sockets against a broker that is already
+           throttling us. */
+        if (claimed || this._joinGen !== gen) return { slot: i, result: 'dropped' };
         const id = await slotPeerId(secret, channel, i);
         let p: Peer;
         try {
@@ -258,6 +278,8 @@ export class Mesh {
 
   leave(keepFlag = false): void {
     if (!keepFlag) this._destroyed = false;
+    /* Abandon any join still probing — its remaining sockets must not open. */
+    this._joinGen++;
     this._clearAllTimers();
     /* departure signal: a datachannel close does not reliably reach the
        peer on every engine (WebKit), so a graceful leave says BYE first */
@@ -319,29 +341,49 @@ export class Mesh {
     });
 
     /* Real broker-outage recovery (the PoC swallowed this). Single-flight:
-       overlapping 'disconnected' events share one retry chain. */
+       overlapping 'disconnected' events share one retry chain.
+       The attempt counter is an INSTANCE field, not a closure local: a
+       _rejoin installs a brand-new Peer every generation, so a local
+       counter restarted at zero forever and the steady state under a
+       broker outage was 8 fresh WebSockets every ~19s — the app
+       hammering the very broker that was throttling it (HTTP 429). */
     p.on('disconnected', () => {
-      if (this._destroyed || this.peer !== p || this._reconnectChain) return;
-      this._reconnectChain = true;
+      if (this._destroyed || this.peer !== p || this._reconnectPeer === p) return;
+      this._reconnectPeer = p;
       set({ connected: false });
       this.log('SIGNAL LOST — RECONNECTING…', 'warn');
-      let tries = 0;
+      let tries = this._reconnectTries;
       const retry = (): void => {
-        if (this._destroyed || !this.peer || this.peer !== p) { this._reconnectChain = false; return; }
+        if (this._destroyed || !this.peer || this.peer !== p) { this._clearReconnect(p); return; }
         try { p.reconnect(); } catch { /* noop */ }
-        this.log(`RECONNECT TRY ${++tries}`, 'sys');
+        tries++;
+        this._reconnectTries = tries;
+        this.log(`RECONNECT TRY ${tries}`, 'sys');
         if (tries < this.cfg.reconnect.maxTries) {
-          setTimeout(retry, Math.min(this.cfg.reconnect.baseMs * 2 ** tries, this.cfg.reconnect.maxMs));
+          /* jittered: a fleet of clients that dropped together must not
+             retry in lockstep and re-create the burst they caused */
+          const base = Math.min(this.cfg.reconnect.baseMs * 2 ** tries, this.cfg.reconnect.maxMs);
+          setTimeout(retry, base * (0.75 + Math.random() * 0.5));
         } else {
-          this._reconnectChain = false;
-          this._rejoin();
+          this._clearReconnect(p);
+          /* Ceiling: after a few exhausted generations, stop reopening
+             sockets and hand the radio back to the user. Without this the
+             loop is self-sustaining and needs no user action to persist. */
+          if (++this._outageGenerations > MAX_OUTAGE_GENERATIONS) {
+            this.log('SIGNAL GONE — WAITING FOR YOU TO RETRY', 'warn');
+            set({ connected: false, joined: false });
+            return;
+          }
+          void this._rejoin().catch(() => {});
         }
       };
       retry();                                    // reconnect immediately, no dead 1.2s
     });
 
     p.on('open', () => {
-      this._reconnectChain = false;
+      this._clearReconnect(p);
+      this._reconnectTries = 0;
+      this._outageGenerations = 0;
       this._dialFails.clear();
       set({ connected: true });
       /* wedge self-heal: the WebKit wedge takes the signaling socket and
@@ -350,6 +392,12 @@ export class Mesh {
          runs — silent when there is nothing to reach). */
       void this._redialSeenPeers();
     });
+  }
+
+  /** Release the reconnect chain — only for the Peer that owns it, so a
+      stale chain's timer can never clear a live chain's flag. */
+  private _clearReconnect(p: Peer): void {
+    if (this._reconnectPeer === p) this._reconnectPeer = null;
   }
 
   /** Wedge recovery: redial every seen peer while holding no live legs.
@@ -768,12 +816,15 @@ export class Mesh {
     this.log(`DC INBOUND — ${conn.peer}`, 'sys');
     const leg = this.legs.get(conn.peer);
     const prev = this._dataConns.get(conn.peer);
-    /* A mirror-dial arrived while we already own (or await) our channel:
-       keep OURS and close the duplicate. Adopting the inbound orphaned
-       the channel that was actually opening — the handshake never settled
-       and the leg redialed forever. */
+    /* A channel already exists for this peer — our own dial that is
+       still settling. Do NOT close either one yet: engines differ on which
+       channel actually opens (WebKit's self-dialed channel routinely never
+       does). Whichever OPENS first wins and becomes the stored channel;
+       the loser is closed then. Deciding on arrival instead killed the
+       only working channel on WebKit and the 8s wire timer then tore down
+       the media leg with it. */
     if (prev && prev !== conn) {
-      try { conn.close(); } catch { /* noop */ }
+      this._promoteOnOpen(conn, prev, leg);
       return;
     }
     this._dataConns.set(conn.peer, conn);
@@ -795,6 +846,28 @@ export class Mesh {
         if (this._dataConns.get(conn.peer) === conn) this._dataConns.delete(conn.peer);
       }
     }, 6000);
+  }
+
+  /** Two channels are competing for one peer. The first to OPEN becomes the
+      stored channel (wired to the leg); the other is closed. Resolves
+      itself on either side opening, and closes both if the leg dies. */
+  private _promoteOnOpen(winner: DataConnection, loser: DataConnection, leg: Leg | undefined): void {
+    const promote = (win: DataConnection, lose: DataConnection): void => {
+      if (this._dataConns.get(win.peer) === lose || this._dataConns.get(win.peer) === undefined) {
+        this._dataConns.set(win.peer, win);
+      }
+      const cur = leg ?? this.legs.get(win.peer);
+      if (cur) this._wireCryptoConn(win, cur);
+      try { lose.close(); } catch { /* noop */ }
+    };
+    const isOpen = (c: DataConnection): boolean => !!(c as unknown as { open?: boolean }).open;
+    if (isOpen(winner)) { promote(winner, loser); return; }
+    if (isOpen(loser)) { promote(loser, winner); return; }
+    const arm = (win: DataConnection, lose: DataConnection): void => {
+      (win as unknown as { on?: (e: string, cb: () => void) => void }).on?.('open', () => promote(win, lose));
+    };
+    arm(winner, loser);
+    arm(loser, winner);
   }
 
   _settleCrypto(leg: Leg, remoteCapable: boolean, why = ''): void {
@@ -868,6 +941,14 @@ export class Mesh {
 
   _emitCrypto(): void {
     const legs = [...this.legs.values()];
+    /* Publish each leg's settlement to the UI. remote-audio gates playback
+       on this: an un-settled (null) or plain-SRTP (false) leg must not
+       reach the speakers — its frames are either raw AES-GCM or cleartext. */
+    for (const leg of legs) {
+      if (state.peers.get(leg.slot) && state.peers.get(leg.slot)?.crypto !== leg.crypto) {
+        setPeer(leg.slot, { crypto: leg.crypto });
+      }
+    }
     let status: string;
     if (!this.e2ee) status = 'srtp-only';
     else if (!legs.length) status = 'ready';

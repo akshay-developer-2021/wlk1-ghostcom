@@ -128,3 +128,41 @@ describe('PTT', () => {
     }
   });
 });
+/* Regression (audit): the arm-failure path called resetGesture(), which
+   touched only holders/CSS. With the mic already adopted, a beginTx throw
+   left the hardware HOT with state.tx false — no button, no teardown, and
+   peers kept receiving audio. Every failure exit must hand it back. */
+describe('PTT failure paths release the mic', () => {
+  it('a beginTx throw releases the mic and closes TX', async () => {
+    const { deps, calls } = makeDeps();
+    deps.mesh.beginTx = vi.fn(async () => { throw new Error('TX ARM FAILED'); });
+    const ctl = createPTT(deps);
+    await ctl.press('pointer');
+    expect(state.tx).toBe(false);
+    expect(calls.release).toBeGreaterThan(0);   // mic handed back
+    expect(calls.endTx).toBeGreaterThan(0);     // no sender keeps the dead track
+    expect(deps.mic.release).toHaveBeenCalled();
+  });
+
+  it('a missing audio track releases the mic', async () => {
+    const { deps, calls } = makeDeps();
+    deps.mic.acquire = vi.fn(async () => ({ stream: deps.mic.stream, track: undefined, generation: 1 }));
+    const ctl = createPTT(deps);
+    await ctl.press('pointer');
+    expect(state.tx).toBe(false);
+    expect(calls.release).toBeGreaterThan(0);
+  });
+
+  it('the next press still works after a failed arm (button not latched)', async () => {
+    const { deps } = makeDeps();
+    deps.mesh.beginTx = vi.fn(async () => { throw new Error('TX ARM FAILED'); });
+    const ctl = createPTT(deps);
+    await ctl.press('pointer');
+    expect(ctl.isPressed).toBe(false);
+    /* the mock still fails, but the press is NOT swallowed by a stuck
+       `pressed` flag — that was the ghost-TX symptom */
+    deps.mesh.beginTx = vi.fn(async () => ({ attached: 1, redialed: 0 }));
+    await ctl.press('pointer');
+    expect(state.tx).toBe(true);
+  });
+});
