@@ -1,5 +1,5 @@
 import { test, expect, chromium, firefox, webkit, type Browser, type Page } from '@playwright/test';
-import { BATCH_SIZE, BROKER_CONFIG, BASE_URL } from './utils/env';
+import { BATCH_SIZE, BROKER_CONFIG, BASE_URL, TLS_BROKER, INJECT_BROKER } from './utils/env';
 import { FAKE_MIC_SCRIPT, needsFakeMicStub, grantMicPermissions } from './utils/media';
 import { applyBrokerConfig } from './utils/room';
 import { joinRoom } from './utils/room';
@@ -23,12 +23,17 @@ const LAUNCH_ARGS = [
   '--use-fake-device-for-media-stream',
   '--use-fake-ui-for-media-stream',
   '--autoplay-policy=no-user-gesture-required',
+  /* a deployed https origin is blocked from wss://localhost by Chrome's
+     local-network policy; the remote recipe injects a local TLS broker */
+  '--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessRespectPreflightResults',
 ];
 
 async function launchUser(label: string, browserName = 'chromium'): Promise<{ browser: Browser; page: Page }> {
   const type = browserName === 'firefox' ? firefox : browserName === 'webkit' ? webkit : chromium;
   const browser = await type.launch(browserName === 'chromium' ? { args: LAUNCH_ARGS } : {});
-  const context = await browser.newContext();
+  /* An injected TLS broker is self-signed (test artifact) — the context
+     must accept it or every wss handshake dies. */
+  const context = await browser.newContext({ ignoreHTTPSErrors: TLS_BROKER && INJECT_BROKER });
   await grantMicPermissions(context, browserName);
   if (needsFakeMicStub(browserName)) await context.addInitScript(FAKE_MIC_SCRIPT);
   const page = await context.newPage();
@@ -78,3 +83,52 @@ test(`1x1 batch: ${BATCH_SIZE} independent two-user sessions against ${BASE_URL}
   console.log(`\n[batch] ${results.length}/${BATCH_SIZE} sessions passed`);
   expect(results).toHaveLength(BATCH_SIZE);
 });
+
+/**
+ * Cross-engine session: the pair the real world actually produces.
+ *
+ * Same-engine runs cannot catch the class of bug that only appears when
+ * the two ends are different engines — the DataChannel deadlock that
+ * looped Brave<->Firefox forever was invisible to every same-engine lane.
+ * These pair chromium with the project's other engines and assert the
+ * whole radio path: join, indicators, tone across the mesh, honest leave.
+ *
+ * E2E_CROSS_PAIRS=chromium,webkit,firefox (default: the two that ship).
+ */
+const CROSS_PAIRS = (process.env['E2E_CROSS_PAIRS'] ?? 'chromium:webkit')
+  .split(',')
+  .map((p) => p.trim())
+  .filter(Boolean);
+
+test.describe.configure({ retries: 0, timeout: 600_000 });
+
+for (const pair of CROSS_PAIRS) {
+  const [left, right] = pair.split(':');
+  if (!left || !right) continue;
+
+  test(`cross-engine: ${left} <-> ${right}`, async () => {
+    /* neither side may be WebKit when we must measure the tone */
+    const measureAudio = left !== 'webkit' && right !== 'webkit';
+    const alice = await launchUser(`alice:${left}`, left);
+    const bob = await launchUser(`bob:${right}`, right);
+    try {
+      await joinRoom(alice.page, bob.page);
+      await assertPeerCount(alice.page, 1);
+      await assertPeerCount(bob.page, 1);
+      await assertPeerChips(alice.page, 1);
+      await assertPeerChips(bob.page, 1);
+
+      if (measureAudio) {
+        await toneRoundTrip(alice.page, bob.page, 1000, 2000, `x-${left}-${right}-a2b`);
+        await toneRoundTrip(bob.page, alice.page, 1000, 2000, `x-${left}-${right}-b2a`);
+      }
+
+      await leaveToJoin(alice.page);
+      await assertScreenVisible(bob.page, 'radio');
+      await assertPeerCount(bob.page, 0);
+      await assertSyncBar(bob.page, 'ON CHANNEL — NO OTHER UNITS');
+    } finally {
+      await Promise.allSettled([alice.browser.close(), bob.browser.close()]);
+    }
+  });
+}

@@ -84,11 +84,18 @@ export function needsFakeMicStub(browserName: string): boolean {
 /**
  * Permission names differ per engine, and WebKit accepts a clipboard-write
  * grant only to fail on the next newPage(). Verified by probing each engine:
- * WebKit has no clipboard-write; Chromium and Firefox have all four.
+ * WebKit has no clipboard-write; Chromium has all four.
+ *
+ * Firefox has NO Playwright permission name for the microphone at all
+ * ("Unknown permission: microphone"), but it does not need one: the
+ * firefoxUserPrefs in playwright.config.ts set
+ * `permissions.default.microphone: 1` and
+ * `media.navigator.permission.disabled: true`, which pre-approve the mic
+ * natively. Calling grantPermissions there only threw and failed every
+ * test, so Firefox is left to its prefs.
  */
 const PERMISSIONS: Record<string, string[]> = {
   chromium: ['microphone', 'camera', 'clipboard-read', 'clipboard-write'],
-  firefox: ['microphone', 'camera', 'clipboard-read', 'clipboard-write'],
   webkit: ['microphone', 'camera', 'clipboard-read'],
 };
 
@@ -96,6 +103,7 @@ export async function grantMicPermissions(
   context: { grantPermissions: (p: string[]) => Promise<void> },
   browserName: string,
 ): Promise<void> {
-  const permissions = PERMISSIONS[browserName] ?? PERMISSIONS['chromium']!;
+  const permissions = PERMISSIONS[browserName];
+  if (!permissions) return;                 // firefox: pre-approved via user prefs
   await context.grantPermissions(permissions);
 }

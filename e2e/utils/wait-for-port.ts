@@ -1,17 +1,36 @@
 /**
  * Block until the signaling broker answers.
  *
- * The probe must speak the broker's own protocol: a wss broker rejects a
- * plain-http request outright, so a http probe would time out against a
- * perfectly healthy TLS broker.
+ * The probe must speak the broker's own protocol: a wss broker does not
+ * answer a plain-http request, and node's fetch refuses the self-signed
+ * test certificate — so a secure probe must complete a TLS handshake with
+ * certificate verification off, exactly what the test contexts do.
  */
+import { request as httpsRequest } from 'node:https';
+
+function probeTls(url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(url, { rejectUnauthorized: false, timeout: 3000 }, (res) => {
+      res.resume();
+      resolve();   // any TLS-complete HTTP answer means the server is listening
+    });
+    req.on('timeout', () => req.destroy(new Error('probe timeout')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 export async function waitForPort(port: number, timeoutMs = 10000, secure = false): Promise<void> {
   const url = `${secure ? 'https' : 'http'}://localhost:${port}/peerjs`;
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
     try {
-      const response = await fetch(url, secure ? { /* self-signed test cert */ } : {});
+      if (secure) {
+        await probeTls(url);
+        return;
+      }
+      const response = await fetch(url);
       // any HTTP answer means the server is listening (404 included)
       if (response.ok || response.status === 404) return;
     } catch {

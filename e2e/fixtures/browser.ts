@@ -2,6 +2,7 @@ import { test as base, BrowserContext, Page, TestInfo } from '@playwright/test';
 import { mergeVideos, checkFFmpeg } from '../utils/video-merge';
 import { LogCollector, LogEntry } from './log-collector';
 import { FAKE_MIC_SCRIPT, needsFakeMicStub, grantMicPermissions, COLD_MIC_SCRIPT, COLD_MIC_MS } from '../utils/media';
+import { TLS_BROKER, INJECT_BROKER } from '../utils/env';
 
 interface TestFixtures {
   alice: { context: BrowserContext; page: Page };
@@ -26,6 +27,9 @@ async function newRadioContext(
       dir: 'test-results/videos/',
       size: { width: 1280, height: 720 },
     },
+    /* An injected TLS broker is self-signed (test artifact) — the context
+       must accept it or every wss handshake dies. */
+    ignoreHTTPSErrors: TLS_BROKER && INJECT_BROKER,
   });
   if (opts.grant !== false) await grantMicPermissions(context, browser.browserType().name());
   /* Firefox/WebKit have no fake-device flag — stub getUserMedia instead */

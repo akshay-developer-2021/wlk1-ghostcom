@@ -48,8 +48,11 @@ jobs:
       - run: npm run build
       - run: npm run test:e2e:webkit
 
-  # Firefox — first matrix lane. Allowed to fail until one green run
-  # proves the engine end to end; flip it into the enforced set then.
+  # Firefox — kept advisory (continue-on-error) until one green run proves
+  # the engine end to end, then flip it into the enforced set. Its earlier
+  # red was a HARNESS bug, not the browser: Playwright Firefox has no
+  # 'microphone' permission name, so grantPermissions threw and failed
+  # every test. The engine is now pre-approved via firefoxUserPrefs.
   e2e-matrix:
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -67,3 +70,30 @@ jobs:
       - run: npx playwright install --with-deps ${{ matrix.browser }}
       - run: npm run build
       - run: npm run test:e2e:${{ matrix.browser }}
+
+  # Cross-engine sessions: the pair real users actually produce. Same-engine
+  # lanes cannot see bugs that only appear when the two ends differ — the
+  # DataChannel deadlock that looped Brave<->Firefox forever passed every
+  # chromium lane and every webkit lane. Enforced: both pairings, both ways.
+  e2e-cross-engine:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pair:
+          - chromium:webkit
+          - chromium:firefox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium webkit firefox
+      - run: npm run build
+      - name: cross-engine session ${{ matrix.pair }}
+        run: npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium
+        env:
+          E2E_CROSS_PAIRS: ${{ matrix.pair }}
+          E2E_BATCH: 1

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { BASE_URL } from './utils/env';
 
 // Mic-permission denials surface as console noise on headless/CI browsers
 // (no mic device, permission auto-denied) — never a product regression.
@@ -20,7 +21,7 @@ test('smoke: shell renders with no TypeErrors', async ({ page }) => {
     }
   });
 
-  await page.goto('/');
+  await page.goto(`${BASE_URL}/`);
   await expect(page).toHaveTitle(/GHOSTCOM/);
   await expect(page.locator('#shell')).toBeVisible();
 
@@ -47,7 +48,7 @@ test('join flow: channel 22 via LINK AUTO reaches the radio LCD', async ({ page 
     }
   });
 
-  await page.goto('/');
+  await page.goto(`${BASE_URL}/`);
   await expect(page).toHaveTitle(/GHOSTCOM/);
 
   // Fresh profile lands on Join; a returning session may already be on radio.
