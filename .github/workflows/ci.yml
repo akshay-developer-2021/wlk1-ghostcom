@@ -68,6 +68,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit ${{ matrix.browser }}
+      # Firefox's AudioContext never leaves "suspended" without an output
+      # device to open. The app's silent carrier then never runs, the mesh
+      # refuses to dial, and every Firefox test fails at LNK 1 with
+      # "AUDIO NOT READY (ctx suspended)" and wire enc=0 dec=0. Autoplay prefs
+      # do not help — this is a missing audio device, not a policy. A null
+      # PulseAudio sink is the one thing the app legitimately needs.
+      # Scoped to Firefox lanes: the chromium and webkit lanes pass without it
+      # and must not be disturbed.
+      - name: give the runner an audio device
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --start --exit-idle-time=-1 --disallow-exit
       - run: npm run build
       - run: npm run test:e2e:${{ matrix.browser }}
       # The app's mesh log is the only evidence a Firefox failure has:
@@ -101,6 +113,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
+      - name: give the runner an audio device
+        if: contains(matrix.pair, 'firefox')
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --start --exit-idle-time=-1 --disallow-exit
       - run: npm run build
       - name: cross-engine session ${{ matrix.pair }}
         run: npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium --workers=1
@@ -154,6 +171,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
+      # Firefox's AudioContext never leaves "suspended" without an output
+      # device to open. The app's silent carrier then never runs, the mesh
+      # refuses to dial, and every Firefox test fails at LNK 1 with
+      # "AUDIO NOT READY (ctx suspended)" and wire enc=0 dec=0. Autoplay prefs
+      # do not help — this is a missing audio device, not a policy. A null
+      # PulseAudio sink is the one thing the app legitimately needs.
+      # Scoped to Firefox lanes: the chromium and webkit lanes pass without it
+      # and must not be disturbed.
+      - name: give the runner an audio device
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --start --exit-idle-time=-1 --disallow-exit
       - run: npm run build
       - name: three-engine session
         run: npm run test:e2e:triple
