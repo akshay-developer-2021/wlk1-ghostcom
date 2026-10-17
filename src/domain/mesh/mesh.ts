@@ -547,11 +547,29 @@ export class Mesh {
          TX-time redial upgrades the leg when the mic goes live. */
       const sil = liveMic ? null : (silentContextRunning() ? silentStream() : null);
       const silTracks = typeof sil?.getAudioTracks === 'function' ? sil.getAudioTracks() : [];
+      const silTrack = silTracks[0] ?? null;
       let recvonly = false;
       try {
         if (liveMic) call.answer(liveMic);
-        else if (sil && silTracks.length) call.answer(sil);
-        else { call.answer(); recvonly = true; }
+        else if (sil && silTrack) {
+          /* Own the answerer's audio transceiver, arm its transform, and only
+             then answer.
+
+             call.answer(stream) adds the track AND sets the local
+             description in one PeerJS step, which leaves no instant between
+             "sender exists" and "sender may start" — and the Linux WebKit
+             build silently ignores an encoded transform assigned after that
+             point. Measured on a chromium caller: WebKit's outbound
+             transform never ran, so every frame left in the clear while the
+             badge read E2E ARMED, and the caller's decryptor discarded each
+             one (enc=1 dec=0 decDrops=2). macOS WebKit tolerates the late
+             attach, which is why it never showed up there.
+
+             Chromium callers do not need this: they create the sender
+             themselves before our code runs. */
+          if (this._armAnswerSender(call, silTrack)) call.answer();
+          else call.answer(sil);
+        } else { call.answer(); recvonly = true; }
       } catch (err) {
         this.log(`ANSWER UNIT-${slot} FAILED — ${(err as Error)?.message ?? err}`, 'warn');
         try { call.close(); } catch { /* noop */ }
@@ -982,6 +1000,24 @@ export class Mesh {
    * Here the leg has just been created and no frame can have left yet: media
    * only flows once ICE and DTLS complete, long after this line.
    */
+  /** Add the answerer's audio transceiver and arm its transform before the
+      answer is applied. Returns false when the engine cannot do it, and the
+      caller then falls back to PeerJS's own addTrack+answer. */
+  private _armAnswerSender(call: any, track: MediaStreamTrack): boolean {
+    const e2ee = this.e2ee;
+    if (!e2ee || this._plainPeers.has(call.peer as string)) return false;
+    const pc = call.peerConnection as RTCPeerConnection | null | undefined;
+    if (!pc || typeof pc.addTransceiver !== 'function') return false;
+    try {
+      const sender = pc.addTransceiver(track, { direction: 'sendrecv' }).sender;
+      if (!('transform' in sender)) return false;
+      e2ee.secureSender(sender).catch(() => { /* the handshake path retries + logs */ });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private _armSenderCrypto(leg: Leg): void {
     const e2ee = this.e2ee;
     const id = leg.call.peer as string;
