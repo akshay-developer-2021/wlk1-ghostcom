@@ -37,8 +37,19 @@ export default defineConfig({
   globalSetup: './e2e/globalSetup.ts',
   globalTeardown: './e2e/globalTeardown.ts',
   /* A deployed origin already serves the build; only serve it locally. */
+  /* The preview server follows the base URL under test, so the subpath shape
+     Pages actually deploys is one env var away:
+       BASE_PATH=/wlk1-ghostcom/ npm run build
+       E2E_BASE_URL=http://localhost:4173/wlk1-ghostcom npm run test:e2e
+     Without this the app asks for /wlk1-ghostcom/assets/... against a server
+     that serves at /, and every lane fails on a 404 — which is what happened
+     the first time CI was given a subpath base. */
   webServer: USE_LOCAL_SERVER
-    ? { command: 'npx vite preview --port 4173', port: 4173, reuseExistingServer: !isCI }
+    ? {
+        command: `npx vite preview --port 4173 --base=${new URL(BASE_URL).pathname}`,
+        port: 4173,
+        reuseExistingServer: !isCI,
+      }
     : undefined,
   projects: [
     {

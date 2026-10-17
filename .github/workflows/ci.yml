@@ -30,8 +30,6 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
-        env:
-          BASE_PATH: /wlk1-ghostcom/
       - run: npm run test:e2e
 
   # WebKit is enforced too: departed peers tear down via the crypto
@@ -48,8 +46,6 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
-        env:
-          BASE_PATH: /wlk1-ghostcom/
       - run: npm run test:e2e:webkit
 
   # Firefox — kept advisory (continue-on-error) until one green run proves
@@ -73,8 +69,6 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit ${{ matrix.browser }}
       - run: npm run build
-        env:
-          BASE_PATH: /wlk1-ghostcom/
       - run: npm run test:e2e:${{ matrix.browser }}
       # The app's mesh log is the only evidence a Firefox failure has:
       # which leg never dialed, and why. Written per test, kept out of stdout.
@@ -108,8 +102,6 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
-        env:
-          BASE_PATH: /wlk1-ghostcom/
       - name: cross-engine session ${{ matrix.pair }}
         run: npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium --workers=1
         env:
@@ -118,6 +110,28 @@ jobs:
       - name: app log
         if: failure()
         run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || cat test-results/logs/*.jsonl
+
+  # The deploy shape. Pages serves this app under /wlk1-ghostcom/, where
+  # root-absolute asset URLs, the service-worker scope and the manifest all
+  # break — a class of failure that no root-served lane can see, and that
+  # used to reach production because CI built with a different base than the
+  # deploy job. Same dist, served the way Pages serves it.
+  e2e-subpath:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+        env:
+          BASE_PATH: /wlk1-ghostcom/
+      - run: npm run test:e2e
+        env:
+          E2E_BASE_URL: http://localhost:4173/wlk1-ghostcom
 
   # The three-engine room: one session, three browsers, one mesh. A pair
   # proves a leg between two engines; only a triple proves that every unit
@@ -141,8 +155,6 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
-        env:
-          BASE_PATH: /wlk1-ghostcom/
       - name: three-engine session
         run: npm run test:e2e:triple
       - name: app log
