@@ -62,9 +62,10 @@ export async function injectTxTrack(page: Page, freq: number, durationMs: number
        hearing its own tone is harmless — CI renders into the null sink. */
     analyser.connect(ctx.destination);
     source.start();
-    const w = window as unknown as { __testTxTrack: MediaStreamTrack; __testTxRate: number; __testTxAnalyser?: AnalyserNode };
+    const w = window as unknown as { __testTxTrack: MediaStreamTrack; __testTxRate: number; __testTxAnalyser?: AnalyserNode; __testTxCtx?: AudioContext };
     w.__testTxTrack = dest.stream.getAudioTracks()[0]!;
     w.__testTxAnalyser = analyser;
+    w.__testTxCtx = ctx;
     /* Read back, not assumed: an engine may hand out a rate it never
        honours, and that is the first thing a wrong reading needs. */
     w.__testTxRate = ctx.sampleRate;
@@ -95,17 +96,29 @@ export async function endTx(page: Page): Promise<void> {
  * intact, so whatever the far side heard was mangled afterwards: the engine's
  * own track/encode path, or the wire.
  */
-export async function measureTxTone(page: Page, samples = 6): Promise<{ freq: number; rms: number }> {
+export async function measureTxTone(page: Page, samples = 6): Promise<{ freq: number; rms: number; state: string; dt: number; fresh: boolean }> {
   return page.evaluate(async (n: number) => {
-    const w = window as unknown as { __testTxAnalyser?: AnalyserNode; __testTxRate?: number };
+    const w = window as unknown as { __testTxAnalyser?: AnalyserNode; __testTxRate?: number; __testTxCtx?: AudioContext };
     const analyser = w.__testTxAnalyser;
     if (!analyser) throw new Error('no tone tap — injectTxTrack did not run');
     const bucket = new Float32Array(analyser.fftSize);
     const rate = w.__testTxRate ?? 0;
+    const ctx = w.__testTxCtx;
+    /* A JS AudioContext whose page loses focus can be interrupted: rendering
+       stops, the analyser keeps serving its last block, and the ENCODER gets
+       garbage while the tap still reads a clean tone. That is exactly the
+       signature under investigation, so report the context's own clock and
+       whether the sampled data moved — a frozen context shows dt≈0 and two
+       identical blocks. */
+    const t0 = ctx?.currentTime ?? -1;
+    let first: Float32Array | null = null;
+    let last: Float32Array | null = null;
     let best = 0, peak = 0;
     for (let k = 0; k < n; k++) {
       await new Promise((r) => setTimeout(r, 50));
       analyser.getFloatTimeDomainData(bucket);
+      if (k === 0) first = bucket.slice();
+      if (k === n - 1) last = bucket.slice();
       let sum = 0;
       for (let i = 0; i < bucket.length; i++) sum += bucket[i]! * bucket[i]!;
       const rms = Math.sqrt(sum / bucket.length);
@@ -120,7 +133,16 @@ export async function measureTxTone(page: Page, samples = 6): Promise<{ freq: nu
         best = Math.max(best, (crossings * rate) / bucket.length);
       }
     }
-    return { freq: Math.round(best), rms: Number(peak.toFixed(4)) };
+    const t1 = ctx?.currentTime ?? -1;
+    let fresh = true;
+    if (first && last) for (let i = 0; i < first.length; i++) if (first[i] !== last[i]) { fresh = false; break; }
+    return {
+      freq: Math.round(best),
+      rms: Number(peak.toFixed(4)),
+      state: ctx?.state ?? 'none',
+      dt: Number((t1 - t0).toFixed(3)),
+      fresh: !fresh,   // true = the data moved during the window
+    };
   }, samples);
 }
 
