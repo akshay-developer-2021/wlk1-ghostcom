@@ -3,8 +3,16 @@ import { configDefaults, defineConfig as defineTestConfig, mergeConfig } from 'v
 import { VitePWA } from 'vite-plugin-pwa';
 import { visualizer } from 'rollup-plugin-visualizer';
 
+/* One source of truth for where the app is served from. Pages project sites
+   live under /<repo>/, a root deploy is '/'. Both CI and the deploy job read
+   this, so the artifact that is tested is the artifact that ships — the two
+   used to be built with different bases, which meant the subpath case (asset
+   URLs, SW scope, manifest links) was never exercised until it deployed. */
+const BASE = process.env.BASE_PATH ?? '/';
+
 export default mergeConfig(
   defineConfig({
+    base: BASE,
     build: {
       target: 'es2022',
       sourcemap: false,
@@ -18,14 +26,6 @@ export default mergeConfig(
       rollupOptions: {
         output: {
           manualChunks: { peerjs: ['peerjs'] },
-          /* stable font URLs (no hash) so index.html can preload them and
-             kill the swap flash; fonts are effectively immutable. */
-          assetFileNames: (info) => {
-            if (info.names?.some((n) => n.endsWith('.woff') || n.endsWith('.woff2'))) {
-              return 'assets/fonts/[name][extname]';
-            }
-            return 'assets/[name]-[hash][extname]';
-          },
         },
       },
     },
@@ -45,7 +45,7 @@ export default mergeConfig(
         injectRegister: false,
         // Precache fonts/icons/manifest too (defaults cover only js/css/html).
         injectManifest: {
-          globPatterns: ['**/*.{js,css,html,woff,woff2,svg,webmanifest}'],
+          globPatterns: ['**/*.{js,css,html,woff2,svg,webmanifest}'],
         },
       }),
       // Bundle visualizer — dev-only, only when ANALYZE=1 (`npm run analyze`).

@@ -30,6 +30,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
+        env:
+          BASE_PATH: /wlk1-ghostcom/
       - run: npm run test:e2e
 
   # WebKit is enforced too: departed peers tear down via the crypto
@@ -46,6 +48,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
+        env:
+          BASE_PATH: /wlk1-ghostcom/
       - run: npm run test:e2e:webkit
 
   # Firefox — kept advisory (continue-on-error) until one green run proves
@@ -69,6 +73,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit ${{ matrix.browser }}
       - run: npm run build
+        env:
+          BASE_PATH: /wlk1-ghostcom/
       - run: npm run test:e2e:${{ matrix.browser }}
       # The app's mesh log is the only evidence a Firefox failure has:
       # which leg never dialed, and why. Written per test, kept out of stdout.
@@ -102,6 +108,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
+        env:
+          BASE_PATH: /wlk1-ghostcom/
       - name: cross-engine session ${{ matrix.pair }}
         run: npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium --workers=1
         env:

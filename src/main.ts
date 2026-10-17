@@ -3,9 +3,10 @@
    Wire-up only; all logic lives in domain/app/infra/ui layers.
    ═══════════════════════════════════════════════════════════════ */
 
-import '@fontsource/vt323/latin-400.css';
-import '@fontsource/inter/latin-400.css';
-import '@fontsource/inter/latin-700.css';
+/* Self-hosted woff2 only: the fontsource CSS shipped a legacy .woff beside
+   every .woff2 — 73 KB of dist and of service-worker precache that no
+   browser in the support matrix ever requests. Faces live in fonts.css. */
+import './styles/fonts.css';
 import './styles/main.css';
 
 import { CONFIG } from './config.js';

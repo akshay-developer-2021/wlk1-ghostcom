@@ -36,13 +36,6 @@ const CACHE_VERSION = 'v2';
 const CACHE_PREFIX = 'wlk1-';
 const CACHE = `${CACHE_PREFIX}${CACHE_VERSION}`;
 const RUNTIME_CAP = 60;
-/* Scope-relative, never root-absolute: the app ships on a SUBPATH
-   (GitHub Pages project site), where '/' is the origin root and 404s. A
-   failing addAll rejects the install event and discards the worker AND
-   workbox's precache — the SW silently never installs. index.html is
-   already in the precache manifest, so nothing is added here. */
-const ASSETS: string[] = [];
-
 // Best-effort: keep the newest entries, drop the oldest beyond the cap.
 function trimRuntime(cache: Cache): Promise<void> {
   return cache
@@ -59,16 +52,21 @@ function trimRuntime(cache: Cache): Promise<void> {
 precacheAndRoute(self.__WB_MANIFEST);
 
 self.addEventListener('install', (event) => {
-  /* No skipWaiting(): the lazy argon2 chunk (passphrase rooms) lives at a
+  /* Open the runtime cache so it exists before the first navigation, and
+     hold the install open for it — without this the worker can activate
+     before the cache does and every runtime read misses.
+
+     No skipWaiting(): the lazy argon2 chunk (passphrase rooms) lives at a
      hashed URL that a deploy deletes. Activating mid-session would swap the
      precache out from under a running document and 404 that import. The new
-     worker takes over on the next navigation instead. */
-  event.waitUntil(
-    caches
-      .open(CACHE)
-      .then((cache) => cache.addAll(ASSETS))
-      .catch(() => undefined),
-  );
+     worker takes over on the next navigation instead.
+
+     Nothing is precached by hand. Every URL here must be scope-relative:
+     the app ships on a SUBPATH (a GitHub Pages project site), where a
+     root-absolute '/' is the origin root and 404s — and a failing addAll
+     rejects the install event, which discards the worker AND workbox's
+     precache, so the SW silently never installs. */
+  event.waitUntil(caches.open(CACHE).catch(() => undefined));
 });
 
 self.addEventListener('activate', (event) => {

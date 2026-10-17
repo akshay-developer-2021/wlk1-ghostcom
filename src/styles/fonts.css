@@ -1,0 +1,34 @@
+/* ═══════════════════════════════════════════════════════════════
+   fonts.css — the only three faces this radio uses, woff2 only.
+
+   Self-hosted rather than imported from @fontsource: those stylesheets
+   emit a legacy .woff next to each .woff2 (73 KB across three faces,
+   precached by the service worker and fetched by nobody). The files live
+   in public/fonts/ so they are copied verbatim and resolve under any
+   deploy base — root or GitHub Pages subpath — matching the preloads in
+   index.html.
+   ═══════════════════════════════════════════════════════════════ */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('/fonts/inter-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url('/fonts/inter-700.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'VT323';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('/fonts/vt323-400.woff2') format('woff2');
+}

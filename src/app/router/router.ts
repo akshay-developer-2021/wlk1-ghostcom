@@ -35,7 +35,3 @@ const link = /^#(\d{1,2})\.([^\s/]+)$/.exec(clean);
 export function buildRadioHash(channel: string, secret: string): string {
   return `#${channel}.${secret}`;
 }
-
-export function buildJoinHash(channel: string): string {
-  return `#c=${channel}`;
-}

@@ -2,7 +2,8 @@
 
    Battery-aware: reduced-motion users get none of the theater. */
 
-import { $, safeGet, safeSet } from '../../infra/dom/dom.js';
+import { safeGet, safeSet } from '../../infra/storage/storage.js';
+import { $ } from '../../infra/dom/dom.js';
 
 const REDUCED: boolean = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 

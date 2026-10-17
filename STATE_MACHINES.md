@@ -76,9 +76,24 @@ arrives. Redialing a streaming slot keeps it lit.
 
 **E2EE attach.** `RTCRtpScriptTransform` is detected via the `transform`
 instance accessor — the legacy `createEncodedStreams` path is deprecated
-and rejects any attach after a sender starts sending, which silently
-downgrades a leg to SRTP. A leg that cannot arm logs `E2EE UNAVAILABLE`
-and keeps working as SRTP; the badge reflects the weakest leg.
+and rejects any attach after a sender starts sending. The same rule holds
+for the modern one, and more quietly: an engine that has already started
+sending simply **ignores** the assignment (measured — `onrtctransform`
+never fires), so a late attach ships cleartext while the badge reads
+"E2E ARMED". The transforms are therefore wired when the leg is
+registered, before any frame can exist; the capability handshake that
+follows only decides whether the leg is *kept*. A peer that answers
+without E2EE is remembered and gets its leg rebuilt untransformed.
+
+Two pumps, one per direction, each a worker that AES-GCMs frames and
+counts what it cannot authenticate. **A zero count proves nothing on its
+own** — a pipeline that never ran also counts zero — so tests assert that
+frames actually moved (`assertEncryptedWire`) and separately that none were
+discarded. Codec-reconfiguration frames (zero-length, one per track swap,
+i.e. per PTT) carry no payload and pass through uncounted.
+
+A leg that cannot arm logs `E2EE UNAVAILABLE` and keeps working as
+SRTP; the badge reflects the weakest leg.
 
 **Guards:** `_joinMutex` (one join at a time), `_reconnectChain` (single
 broker reconnect), `_txGen` (stale async TX callbacks drop out), and

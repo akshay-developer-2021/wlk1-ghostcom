@@ -1,6 +1,7 @@
 /* ui/components/volume-slider.ts — volume control with persistence. */
 
-import { $, safeGet, safeSet } from '../../infra/dom/dom.js';
+import { safeGet, safeSet } from '../../infra/storage/storage.js';
+import { $ } from '../../infra/dom/dom.js';
 
 export interface VolumeDeps {
   /** Extra sink for paths el.volume cannot reach (WebAudio graph on iOS). */

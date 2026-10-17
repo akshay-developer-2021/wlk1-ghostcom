@@ -27,16 +27,91 @@ export async function waitForBrokerConnected(page: Page, timeout = 30000): Promi
   );
 }
 
-/** LNK counts REMOTE units (self is never in the peers map), so a
-    2-user room reads LNK 1 with one chip per side. */
+/**
+ * What the page itself knows about a leg that will not come up: the app's own
+ * log lines (the same ones the settings screen shows a user) plus live WebRTC
+ * state per leg.
+ *
+ * This exists because "expected LNK 1, received 0" is not a diagnosis. The
+ * three ways a leg stalls — the audio context never started, the dialer
+ * refused for lack of a sender, ICE gathered nothing on loopback — produce
+ * byte-identical assertion output, and each one took a CI round trip to tell
+ * apart.
+ */
+export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
+  return page
+    .evaluate(async (tailLines) => {
+      const appLog = Array.from(document.querySelectorAll('#hackLines .body'))
+        .slice(-tailLines)
+        .map((n) => (n.textContent ?? '').trim());
+      const mesh = (window as unknown as {
+        mesh?: {
+          e2ee?: { stats: () => Promise<{ drops: number; encCount: number; decCount: number }> } | null;
+          legs?: Map<string, {
+            slot: number;
+            crypto: boolean | null;
+            call: { peer?: string; peerConnection?: RTCPeerConnection | null };
+          }>;
+        };
+      }).mesh;
+      if (!mesh) return `no window.mesh; app log:\n  ${appLog.join('\n  ')}`;
+
+      const legs: string[] = [];
+      for (const [, leg] of mesh.legs ?? []) {
+        const pc = leg.call?.peerConnection ?? null;
+        let detail = 'no peerConnection';
+        if (pc) {
+          const stats = await pc.getStats();
+          let pairs = 0, candidates = 0, sent = 0, recv = 0, frames = 0;
+          stats.forEach((r) => {
+            const v = r as unknown as Record<string, number | string>;
+            if (r.type === 'candidate-pair' && v.state === 'succeeded') pairs++;
+            if (r.type === 'local-candidate' || r.type === 'remote-candidate') candidates++;
+            if (r.type === 'outbound-rtp' && r.kind === 'audio') sent += Number(v.bytesSent ?? 0);
+            if (r.type === 'inbound-rtp' && r.kind === 'audio') {
+              recv += Number(v.bytesReceived ?? 0);
+              frames = Math.max(frames, Number(v.frameCount ?? 0));
+            }
+          });
+          detail =
+            `pc=${pc.connectionState}/ice=${(pc as RTCPeerConnection & { iceConnectionState?: string }).iceConnectionState}` +
+            ` senders=${pc.getSenders().length} receivers=${pc.getReceivers().length}` +
+            ` txTransform=${pc.getSenders().filter((s) => 'transform' in s).length}` +
+            ` rxTransform=${pc.getReceivers().filter((r) => 'transform' in r).length}` +
+            ` candidates=${candidates} pairs=${pairs} bytesSent=${sent} bytesRecv=${recv} frames=${frames}`;
+        }
+        legs.push(`UNIT-${leg.slot} crypto=${String(leg.crypto)} ${detail}`);
+      }
+      const wire = mesh.e2ee ? await mesh.e2ee.stats() : null;
+      const wireLine = wire
+        ? `wire enc=${wire.encCount} dec=${wire.decCount} drops=${wire.drops}`
+        : 'wire: no e2ee engine';
+      return [`legs=${mesh.legs?.size ?? 0}`, wireLine, ...legs, 'app log:', ...appLog.map((l) => `  ${l}`)]
+        .join('\n');
+    }, tail)
+    .catch((err: Error) => `diagnostics failed: ${err.message}`);
+}
+
+/**
+ * LNK counts REMOTE units (self is never in the peers map), so a
+ * 2-user room reads LNK 1 with one chip per side.
+ *
+ * On timeout both pages dump what they know, so the failure names the cause
+ * instead of only the symptom.
+ */
 export async function waitForMeshLink(pageA: Page, pageB: Page, timeout = 30000): Promise<void> {
   await Promise.all([waitForPeerId(pageA, timeout), waitForPeerId(pageB, timeout)]);
-  await Promise.all([
-    expect(pageA.locator('#lnkCount')).toHaveText('1', { timeout }),
-    expect(pageB.locator('#lnkCount')).toHaveText('1', { timeout }),
-  ]);
-  await expect(pageA.locator('.chip')).toHaveCount(1, { timeout: 5000 });
-  await expect(pageB.locator('.chip')).toHaveCount(1, { timeout: 5000 });
+  try {
+    await Promise.all([
+      expect(pageA.locator('#lnkCount')).toHaveText('1', { timeout }),
+      expect(pageB.locator('#lnkCount')).toHaveText('1', { timeout }),
+    ]);
+    await expect(pageA.locator('.chip')).toHaveCount(1, { timeout: 5000 });
+    await expect(pageB.locator('.chip')).toHaveCount(1, { timeout: 5000 });
+  } catch (err) {
+    const [a, b] = await Promise.all([meshDiagnostics(pageA), meshDiagnostics(pageB)]);
+    throw new Error(`${(err as Error).message}\n── pageA ──\n${a}\n── pageB ──\n${b}`);
+  }
 }
 
 /** Close the first-run hint overlay if it is showing. */
@@ -220,9 +295,14 @@ export async function assertEncryptedWire(page: Page, who: string): Promise<{ en
   }
   expect(stats, `${who}: no E2EE worker`).not.toBeNull();
   const s = stats!;
-  expect(s.enc.n, `${who}: encryptor processed no frames — the outbound transform is not attached`).toBeGreaterThan(0);
-  expect(s.dec.n, `${who}: decryptor processed no frames — the inbound transform is not attached`).toBeGreaterThan(0);
-  expect(s.dec.drops, `${who}: decryptor discarded ${s.dec.drops} frame(s) while idle — the peer is not encrypting`).toBe(0);
+  /* Both counters travel with every failure: enc=0 with dec=0 is a leg that
+     moved nothing at all, dec=0 with drops>0 is frames arriving in the clear
+     (our inbound transform missing), and drops=0 with dec=0 is a decryptor
+     that never ran. Those three need three different fixes. */
+  const counts = ` [enc=${s.enc.n} dec=${s.dec.n} encDrops=${s.enc.drops} decDrops=${s.dec.drops}]`;
+  expect(s.enc.n, `${who}: encryptor processed no frames — the outbound transform is not attached${counts}`).toBeGreaterThan(0);
+  expect(s.dec.n, `${who}: decryptor processed no frames — the inbound transform is not attached${counts}`).toBeGreaterThan(0);
+  expect(s.dec.drops, `${who}: decryptor discarded ${s.dec.drops} frame(s) while idle — the peer is not encrypting${counts}`).toBe(0);
   return { enc: s.enc.n, dec: s.dec.n };
 }
 

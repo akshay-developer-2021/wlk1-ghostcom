@@ -24,9 +24,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # Project Pages serve under /wlk1-ghostcom/ — build with that base so
-      # asset URLs, SW scope, and manifest links all resolve.
-      - run: npx vite build --base=/wlk1-ghostcom/
+      # Same base the CI jobs build with — see BASE_PATH in vite.config.ts.
+      - run: npm run build
+        env:
+          BASE_PATH: /wlk1-ghostcom/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

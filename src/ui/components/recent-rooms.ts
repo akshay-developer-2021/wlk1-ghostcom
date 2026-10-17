@@ -1,6 +1,7 @@
 /* ui/components/recent-rooms.ts — recent rooms list. */
 
-import { $, safeGet, safeSet, safeRemove } from '../../infra/dom/dom.js';
+import { safeGet, safeRemove, safeSet } from '../../infra/storage/storage.js';
+import { $ } from '../../infra/dom/dom.js';
 import { isValidRoomSecret, normalizeRoomSecret } from '../../domain/crypto/crypto.js';
 
 const RECENT_KEY = 'wlk1-recent';

@@ -1,6 +1,7 @@
 /* ui/components/settings-screen.ts — settings screen controller. */
 
-import { $, safeGet, safeSet, toast, log, copyAllLogs } from '../../infra/dom/dom.js';
+import { safeGet, safeSet } from '../../infra/storage/storage.js';
+import { $, toast, log, copyAllLogs } from '../../infra/dom/dom.js';
 import { CONFIG, BROKER_STORE_KEY } from '../../config.js';
 import { E2EE } from '../../domain/security/e2ee.js';
 import { generateRoomSecret } from '../../domain/crypto/crypto.js';

@@ -3,7 +3,7 @@
 import { toast, log } from '../../infra/dom/dom.js';
 import { state, set } from '../../domain/state/state.js';
 import { normalizeRoomSecret, isValidRoomSecret, buildShareLink } from '../../domain/crypto/crypto.js';
-import { safeSet } from '../../infra/dom/dom.js';
+import { safeSet } from '../../infra/storage/storage.js';
 
 export function shareChannel(): void {
   const raw = typeof state.secret === 'string' ? state.secret : '';

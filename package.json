@@ -1,6 +1,6 @@
 {
   "name": "wlk1-ghostcom",
-  "description": "WLK-1 GHOSTCOM \u2014 encrypted P2P field radio (production)",
+  "description": "WLK-1 GHOSTCOM — encrypted P2P field radio (production)",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -23,8 +23,6 @@
     "test:e2e:firefox": "playwright test --project=firefox"
   },
   "dependencies": {
-    "@fontsource/inter": "^5.1.0",
-    "@fontsource/vt323": "^5.1.0",
     "hash-wasm": "^4.12.0",
     "peerjs": "^1.5.4"
   },

@@ -1,6 +1,7 @@
 /* ui/components/join-screen.ts — join screen controller. */
 
-import { $, safeGet, safeSet, safeRemove, safeSessGet, safeSessSet, safeSessRemove, toast, log, setSync } from '../../infra/dom/dom.js';
+import { safeGet, safeRemove, safeSessGet, safeSessRemove, safeSessSet, safeSet } from '../../infra/storage/storage.js';
+import { $, toast, log, setSync } from '../../infra/dom/dom.js';
 import { passphraseStrength } from '../../domain/crypto/crypto.js';
 import { generateRoomSecret, deriveSecretFromPassphrase } from '../../domain/crypto/crypto.js';
 import { pushRecent, renderRecents } from './recent-rooms.js';

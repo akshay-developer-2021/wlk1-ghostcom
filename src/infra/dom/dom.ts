@@ -99,22 +99,3 @@ export function log(msg: string, kind: string = 'sys'): void {
   console.log(`[WLK1] ${new Date().toTimeString().slice(0, 8)} ${prefix} ${msg}`);
 }
 
-/* ── safe storage (Firefox private mode throws on access) ─── */
-export function safeGet(key: string): string | null {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-export function safeSet(key: string, value: string): void {
-  try { localStorage.setItem(key, value); } catch { /* private mode: persistence skipped */ }
-}
-export function safeRemove(key: string): void {
-  try { localStorage.removeItem(key); } catch { /* noop */ }
-}
-export function safeSessGet(key: string): string | null {
-  try { return sessionStorage.getItem(key); } catch { return null; }
-}
-export function safeSessSet(key: string, value: string): void {
-  try { sessionStorage.setItem(key, value); } catch { /* noop */ }
-}
-export function safeSessRemove(key: string): void {
-  try { sessionStorage.removeItem(key); } catch { /* noop */ }
-}
