@@ -28,11 +28,17 @@ const CANDIDATES = [
   { name: 'autoplay + fake stream pref', prefs: { ...AUTOPLAY, 'media.navigator.streams.fake': true } },
 ];
 
+/** Hard bound per candidate: a browser that never answers must not hold a
+    CI runner for half an hour. This exact hang is why the first version of
+    this probe sat in "in progress" for 28 minutes — Firefox refuses a
+    top-level data: URI navigation, so goto() never settled. */
+const CANDIDATE_TIMEOUT_MS = 45_000;
+
 async function probe(prefs) {
   const browser = await firefox.launch({ headless: true, firefoxUserPrefs: prefs });
   try {
     const page = await browser.newPage();
-    await page.goto('data:text/html,<h1>probe</h1>');
+    await page.goto('about:blank');
     return await page.evaluate(async () => {
       const ctx = new AudioContext();
       const before = ctx.state;
@@ -71,9 +77,18 @@ async function probe(prefs) {
   }
 }
 
+async function bounded(prefs) {
+  return Promise.race([
+    probe(prefs),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`no answer in ${CANDIDATE_TIMEOUT_MS / 1000}s`)), CANDIDATE_TIMEOUT_MS).unref?.(),
+    ),
+  ]);
+}
+
 for (const c of CANDIDATES) {
   try {
-    const r = await probe(c.prefs);
+    const r = await bounded(c.prefs);
     const works = r.after === 'running' && r.oscillatorPeak > 0;
     console.log(`${works ? 'WORKS ' : 'BROKEN'} ${c.name}: ${JSON.stringify(r)}`);
   } catch (err) {
