@@ -86,6 +86,7 @@ export class Mesh {
   private _qualityHistory: number[] = [];
   private _dataConns = new Map<string, DataConnection>();      // peerId -> crypto-negotiation DataChannel
   private _ourDials = new WeakSet<DataConnection>();          // channels WE opened (vs received)
+  private _wirePark = new WeakMap<DataConnection, WireMsg[]>();  // messages waiting for the native channel to open
   private _plainPeers = new Set<string>();                    // peers whose hello carried no E2EE
   /* The track PTT handed to beginTx: live from arm to endTx. While it is
      set, every leg this mesh creates or answers must carry THAT audio.
@@ -821,8 +822,32 @@ export class Mesh {
     }, 8_000);
   }
 
-  /** The only way a message reaches a peer. */
+  /** The only way a message reaches a peer.
+   *
+   * PeerJS's `open` flag says "the SDP ANSWER landed", not "the browser's
+   * DataChannel can carry data" (its handleMessage sets `_open = true` from
+   * the answer), so a send can arrive while the native channel is still
+   * connecting — `CHANNEL OPEN` is not proof either. Chromium buffers such a
+   * send; WebKit throws "Error sending binary data through RTCDataChannel",
+   * PeerJS catches that, logs it and CLOSES the channel — and WebKit's page
+   * error ratchet reads the log as a crash while the leg dies with the
+   * channel. Park the message and flush it on the native open instead.
+   * A channel we have no state for is sent to as before. */
   private _wireSend(conn: DataConnection, msg: WireMsg): void {
+    const dc = (conn as unknown as { dataChannel?: RTCDataChannel | null }).dataChannel;
+    if (dc?.readyState === 'closing' || dc?.readyState === 'closed') return;
+    if (dc?.readyState === 'connecting') {
+      const parked = this._wirePark.get(conn);
+      if (parked) { parked.push(msg); return; }
+      const queue: WireMsg[] = [msg];
+      this._wirePark.set(conn, queue);
+      /* addEventListener, not onopen: that property belongs to PeerJS. */
+      dc.addEventListener('open', () => {
+        this._wirePark.delete(conn);
+        for (const m of queue) { try { conn.send(JSON.stringify(m)); } catch { /* noop */ } }
+      });
+      return;
+    }
     try { conn.send(JSON.stringify(msg)); } catch { /* noop */ }
   }
 

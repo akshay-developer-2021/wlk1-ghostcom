@@ -1022,6 +1022,39 @@ describe('DataChannel ownership (single dialer per leg pair)', () => {
     mesh.leave();
   });
 
+  /* PeerJS sets its own `open` from the SDP ANSWER, so a wire message can be
+     handed to a channel the browser still calls connecting. Chromium buffers
+     that send; WebKit throws "Error sending binary data through
+     RTCDataChannel", PeerJS catches it and closes the channel, and the leg
+     dies with it. The message waits for the native open instead. */
+  it('a message for a still-connecting channel waits for the native open', () => {
+    const { mesh } = makeMesh();
+    const conn = fakeConn('peer-4');
+    const native = {
+      readyState: 'connecting',
+      handlers: {},
+      addEventListener(ev, cb) { (this.handlers[ev] ??= []).push(cb); },
+    };
+    conn.dataChannel = native;
+    mesh._registerLeg(fakeCall('peer-4', fakeSender()), 4, 'listen');
+    mesh._wireCryptoConn(conn, mesh.legs.get('peer-4'));
+
+    conn.fire('open');                                  // PeerJS says open…
+    conn.open = true;
+    expect(conn.sent).toEqual([]);                      // …the native channel does not agree
+    conn.fire('data', JSON.stringify({ t: 'wlk1-hello', e2ee: true }));
+    expect(conn.sent).toEqual([]);
+
+    native.readyState = 'open';
+    for (const cb of native.handlers['open'] ?? []) cb();
+    expect(conn.sent.map((m) => JSON.parse(m).t)).toEqual(['wlk1-hello', 'wlk1-ack']);
+
+    native.readyState = 'closed';                       // a dead channel is never sent to
+    conn.fire('data', JSON.stringify({ t: 'wlk1-hello', e2ee: true }));
+    expect(conn.sent).toHaveLength(2);
+    mesh.leave();
+  });
+
   /* WebKit rejects a DataChannel.send() of anything but text/blob/binary with
      "Error sending binary data through RTCDataChannel", which surfaced as an
      uncaught page error that killed a three-peer session. Every message goes
