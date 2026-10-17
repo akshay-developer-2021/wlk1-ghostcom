@@ -469,13 +469,21 @@ export async function assertWireHonest(
  * (Sequential ptt-then-record can never catch the tone.)
  */
 /** The audio track a page's leg senders hold right now — what the wire is
-    actually able to carry. 'none' when no leg has an audio sender. */
+    actually able to carry. 'none' when no leg has an audio sender. Rate is
+    included because a cross-rate track swap is a known pipeline-mangling
+    trigger, and the two tracks this test swaps between come from different
+    contexts. */
 async function senderTrackId(page: Page): Promise<string> {
   return page.evaluate(() => {
     const w = window as unknown as { mesh?: { legs?: Map<string, { call?: { peerConnection?: RTCPeerConnection } }> } };
     for (const leg of w.mesh?.legs?.values() ?? []) {
       for (const s of leg.call?.peerConnection?.getSenders() ?? []) {
-        if (s.track && s.track.kind === 'audio') return s.track.id;
+        if (s.track && s.track.kind === 'audio') {
+          const st = typeof s.track.getSettings === 'function' ? s.track.getSettings() : null;
+          const rate = (st as { sampleRate?: number } | null)?.sampleRate;
+          const ch = (st as { channelCount?: number } | null)?.channelCount;
+          return `${s.track.id}@${rate ?? '?'}Hz/${ch ?? '?'}ch`;
+        }
       }
     }
     return 'none';
