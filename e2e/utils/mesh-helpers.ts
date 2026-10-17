@@ -154,12 +154,11 @@ async function frameDrops(page: Page): Promise<{ drops: number; encCount: number
  * Assert the E2EE pipeline discarded nothing, and hand back the counts so
  * the run shows whether frames actually moved.
  *
- * Honest limit, measured not assumed: on the headless Chromium in this
- * repo's CI, `onrtctransform` fires but encoded frames are never delivered
- * to the worker, so the counts are zero on BOTH fields and a passing result
- * here is necessary but not sufficient. Play a tone round trip through a
- * WebKit peer to exercise the pipeline for real. Returns the stats so a
- * caller can log them instead of passing silently.
+ * The counts used to read zero on both fields on Chromium — which reads as
+ * "no frames were thrown away" when in fact the transform had been attached
+ * after the sender started and the engine was delivering nothing at all.
+ * assertEncryptedWire below is the check that tells those two apart; this one
+ * is the "nothing discarded" half of the same claim.
  */
 export async function assertNoFrameDrops(
   page: Page,
@@ -170,6 +169,59 @@ export async function assertNoFrameDrops(
   const s = stats!;
   expect(s.drops, `${who}: E2EE worker discarded ${s.drops} frame(s) — frames are being silently dropped`).toBe(0);
   return s;
+}
+
+/**
+ * Per-direction counts straight from the two direction-workers.
+ *
+ * The aggregate above cannot tell "encrypted nothing" from "encrypted
+ * everything": both read zero drops when the transform never attached, which
+ * is exactly how Chromium shipped cleartext with the badge on.
+ */
+async function wireStats(page: Page): Promise<{ enc: { drops: number; n: number }; dec: { drops: number; n: number } } | null> {
+  return page.evaluate(async () => {
+    const e2ee = (window as unknown as { mesh?: { e2ee?: { _enc: Worker; _dec: Worker } | null } }).mesh?.e2ee;
+    if (!e2ee) return null;
+    const one = (w: Worker, key: 'encCount' | 'decCount'): Promise<{ drops: number; n: number }> =>
+      new Promise((res) => {
+        const onMsg = (e: MessageEvent): void => {
+          if (e.data?.type !== 'stats') return;
+          w.removeEventListener('message', onMsg);
+          res({ drops: e.data.drops ?? 0, n: e.data[key] ?? 0 });
+        };
+        w.addEventListener('message', onMsg);
+        w.postMessage({ type: 'stats' });
+      });
+    const [enc, dec] = await Promise.all([one(e2ee._enc, 'encCount'), one(e2ee._dec, 'decCount')]);
+    return { enc, dec };
+  });
+}
+
+/**
+ * The frame pipeline is LIVE in both directions.
+ *
+ * Chromium ignores a transform assigned to a sender/receiver that has already
+ * started sending, so an attach that waits for the capability handshake is
+ * silently dropped by the engine: the encryptor sees nothing, the peer
+ * discards every cleartext frame it receives, and the LCD still reads
+ * "E2E ARMED". Both halves have to be observed, because either one alone
+ * passes on a pipeline that is not running.
+ */
+export async function assertEncryptedWire(page: Page, who: string): Promise<{ enc: number; dec: number }> {
+  const deadline = Date.now() + 8000;
+  let stats = await wireStats(page);
+  /* Frames take a moment to flow after the link; poll rather than sample
+     once, or the assertion measures the gap instead of the pipeline. */
+  while (Date.now() < deadline && !(stats && stats.enc.n > 0 && stats.dec.n > 0)) {
+    await page.waitForTimeout(250);
+    stats = await wireStats(page);
+  }
+  expect(stats, `${who}: no E2EE worker`).not.toBeNull();
+  const s = stats!;
+  expect(s.enc.n, `${who}: encryptor processed no frames — the outbound transform is not attached`).toBeGreaterThan(0);
+  expect(s.dec.n, `${who}: decryptor processed no frames — the inbound transform is not attached`).toBeGreaterThan(0);
+  expect(s.dec.drops, `${who}: decryptor discarded ${s.dec.drops} frame(s) while idle — the peer is not encrypting`).toBe(0);
+  return { enc: s.enc.n, dec: s.dec.n };
 }
 
 /**

@@ -42,6 +42,11 @@ async function pump(readable, writable, direction) {
     for (;;) {
       const { value: frame, done } = await reader.read();
       if (done) break;
+      /* A codec-reconfiguration frame carries no payload (the browser emits
+         one at every track swap, i.e. every PTT). There is nothing to
+         protect and nothing to authenticate: it must not be counted as a
+         dropped audio frame, or every press spams the tamper warning. */
+      if (!frame.data || frame.data.byteLength === 0) { await writer.write(frame); continue; }
       if (!key) { bumpDrops(); continue; }   // rekey race — drop, never send clear
       let out = null;
       try {
@@ -76,7 +81,7 @@ self.onrtctransform = (event) => {
 };
 `;
 
-type MarkedSender = RTCRtpSender & { __wlkTrack?: MediaStreamTrack | null };
+type MarkedSender = RTCRtpSender & { __wlkSecured?: boolean };
 type MarkedReceiver = RTCRtpReceiver & { __wlkDec?: boolean };
 type ScriptTransformCtor = new (worker: Worker, options?: unknown) => unknown;
 /** createEncodedStreams was removed from lib.dom but still ships in browsers. */
@@ -148,16 +153,17 @@ export class E2EE {
     this.enabled = true;
   }
 
-  /** Wire encryption into an outbound sender.
-      Re-arm when the SENDER'S TRACK changed, not on every call: each
-      assignment builds a new RTCRtpScriptTransform and abandons the
-      previous pump inside the worker, so beginTx calling this every press
-      would pile up loops for the life of the session. Guarding on the
-      sender alone (the old __wlkEnc flag) skipped the re-arm after
-      replaceTrack entirely; keying on the track gets both. */
+  /** Wire encryption into an outbound sender — ONCE per sender.
+      The transform belongs to the SENDER, not to its track: replaceTrack
+      (PTT) keeps it in the pipeline, so re-arming per track change is not
+      just wasteful, it opens a plaintext window. Measured: every press
+      rebuilt the transform and the peer dropped ~18 frames it could not
+      authenticate — the frames the swap emitted outside the new pump.
+      Each assignment also abandons the previous pump inside the worker, so
+      a per-press re-arm piled up dead loops for the life of the session. */
   async secureSender(sender: RTCRtpSender): Promise<void> {
     const marked = sender as MarkedSender;
-    if (!this.enabled || !sender || marked.__wlkTrack === sender.track) return;
+    if (!this.enabled || !sender || marked.__wlkSecured) return;
     await this._ready;
     try {
       const ST = scriptTransformCtor();
@@ -172,7 +178,7 @@ export class E2EE {
       this._log(`E2EE SENDER ATTACH FAILED — ${(err as Error)?.message ?? err}`, 'warn');
       throw err; // the mesh keeps the leg on SRTP and says so
     }
-    marked.__wlkTrack = sender.track;
+    marked.__wlkSecured = true;
   }
 
   /** Wire decryption into an inbound receiver. */

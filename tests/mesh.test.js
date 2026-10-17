@@ -948,3 +948,71 @@ describe('DataChannel ownership (single dialer per leg pair)', () => {
     mesh.leave();
   });
 });
+
+describe('E2EE transform timing (armed at leg creation)', () => {
+  const e2eeMock = () => ({ secureSender: vi.fn().mockResolvedValue(), secureReceiver: vi.fn().mockResolvedValue() });
+  const openConn = (peerId) => ({ peer: peerId, open: true, on: () => {}, send: () => {}, close: () => {} });
+
+  it('wires the outbound transform when the leg is registered, not after the handshake', () => {
+    const e2ee = e2eeMock();
+    const { mesh } = makeMesh(e2ee);
+    const sender = fakeSender();
+    try {
+      mesh._registerLeg(fakeCall('peer-0', sender), 0, 'listen');
+      /* Chromium ignores a transform assigned once the sender has started
+         sending (measured: onrtctransform never fires), so the attach must
+         not wait for the capability handshake. */
+      expect(e2ee.secureSender).toHaveBeenCalledWith(sender);
+      expect(mesh.legs.get('peer-0')._cryptoArmed).toBe(true);
+    } finally {
+      mesh.leave();
+    }
+  });
+
+  it('arms a receiver that already exists (the answerer gets it before answer() returns)', () => {
+    const e2ee = e2eeMock();
+    const { mesh } = makeMesh(e2ee);
+    const receiver = { track: { kind: 'audio' } };
+    const call = fakeCall('peer-0', fakeSender());
+    call.peerConnection.getReceivers = () => [receiver];
+    try {
+      mesh._registerLeg(call, 0, 'listen', false);
+      expect(e2ee.secureReceiver).toHaveBeenCalledWith(receiver);
+      call.firePc('track', { receiver });               // dialer side: arrives later
+      expect(e2ee.secureReceiver).toHaveBeenCalledTimes(2);
+    } finally {
+      mesh.leave();
+    }
+  });
+
+  it('a peer that answers without E2EE gets the leg rebuilt untransformed', () => {
+    const e2ee = e2eeMock();
+    const { mesh } = makeMesh(e2ee);
+    try {
+      mesh._registerLeg(fakeCall('peer-1', fakeSender()), 0, 'listen');
+      expect(e2ee.secureSender).toHaveBeenCalledTimes(1);
+
+      mesh._settleCrypto(mesh.legs.get('peer-1'), false, 'peer lacks transforms');
+      expect(mesh.legs.has('peer-1')).toBe(false);      // an encrypted leg it cannot read is useless
+
+      const rebuilt = mesh._registerLeg(fakeCall('peer-1', fakeSender()), 0, 'listen');
+      expect(rebuilt._cryptoArmed).toBeFalsy();        // no transform to a peer without transforms
+      expect(e2ee.secureSender).toHaveBeenCalledTimes(1);
+    } finally {
+      mesh.leave();
+    }
+  });
+
+  it('a handshake that merely never completed does not condemn the peer', () => {
+    const e2ee = e2eeMock();
+    const { mesh } = makeMesh(e2ee);
+    try {
+      mesh._registerLeg(fakeCall('peer-2', fakeSender()), 0, 'listen');
+      mesh._settleCrypto(mesh.legs.get('peer-2'), false, 'handshake timeout');
+      expect(mesh.legs.has('peer-2')).toBe(true);       // leg survives, plain SRTP
+      expect(mesh.legs.get('peer-2').crypto).toBe(false);
+    } finally {
+      mesh.leave();
+    }
+  });
+});

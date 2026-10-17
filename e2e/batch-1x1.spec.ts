@@ -3,7 +3,7 @@ import { BATCH_SIZE, BROKER_CONFIG, BASE_URL, TLS_BROKER, INJECT_BROKER } from '
 import { FAKE_MIC_SCRIPT, needsFakeMicStub, grantMicPermissions } from './utils/media';
 import { applyBrokerConfig } from './utils/room';
 import { joinRoom } from './utils/room';
-import { toneRoundTrip, leaveToJoin } from './utils/mesh-helpers';
+import { toneRoundTrip, leaveToJoin, assertEncryptedWire } from './utils/mesh-helpers';
 import { assertPeerCount, assertPeerChips, assertScreenVisible, assertSyncBar } from './utils/assertions';
 
 /**
@@ -115,8 +115,6 @@ for (const pair of CROSS_PAIRS) {
   if (!left || !right) continue;
 
   test(`cross-engine: ${left} <-> ${right}`, async () => {
-    /* neither side may be WebKit when we must measure the tone */
-    const measureAudio = left !== 'webkit' && right !== 'webkit';
     const alice = await launchUser(`alice:${left}`, left);
     const bob = await launchUser(`bob:${right}`, right);
     try {
@@ -126,8 +124,20 @@ for (const pair of CROSS_PAIRS) {
       await assertPeerChips(alice.page, 1);
       await assertPeerChips(bob.page, 1);
 
-      if (measureAudio) {
+      /* Checked while the only thing on the wire is the silent carrier: both
+         ends must be transforming real frames, not shipping cleartext. WebKit
+         cannot decode its own recording, so this is also the only check the
+         WebKit-receives direction gets. */
+      console.log(`wire ${left}:`, JSON.stringify(await assertEncryptedWire(alice.page, left)));
+      console.log(`wire ${right}:`, JSON.stringify(await assertEncryptedWire(bob.page, right)));
+
+      /* The tone is recorded on the RECEIVING side, and WebKit cannot decode
+         its own MediaRecorder output — so a direction is measurable unless
+         the receiver is WebKit, not unless either side is. */
+      if (right !== 'webkit') {
         await toneRoundTrip(alice.page, bob.page, 1000, 2000, `x-${left}-${right}-a2b`);
+      }
+      if (left !== 'webkit') {
         await toneRoundTrip(bob.page, alice.page, 1000, 2000, `x-${left}-${right}-b2a`);
       }
 

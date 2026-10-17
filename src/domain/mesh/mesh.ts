@@ -24,7 +24,7 @@ import type { Sfx } from '../audio/sfx.js';
 import type { E2EE } from '../security/e2ee.js';
 import type { LogKind } from '../../infra/dom/dom.js';
 
-export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mode: 'live'|'listen'; crypto: boolean|null; dcOwner?: boolean; recvonly?: boolean; _cryptoTimer?: any; _misses?: number; _neverTimer?: any; _wireTimer?: any; _wireOpen?: boolean; _sasDone?: boolean; _sasListeners?: { ice: (() => void) | null; conn: (() => void) | null } }
+export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mode: 'live'|'listen'; crypto: boolean|null; dcOwner?: boolean; recvonly?: boolean; _cryptoArmed?: boolean; _cryptoTimer?: any; _misses?: number; _neverTimer?: any; _wireTimer?: any; _wireOpen?: boolean; _sasDone?: boolean; _sasListeners?: { ice: (() => void) | null; conn: (() => void) | null } }
 
 export interface TxReport { attached: number; redialed: number }
 
@@ -80,6 +80,7 @@ export class Mesh {
   private _txGen = 0;
   private _dataConns = new Map<string, DataConnection>();      // peerId -> crypto-negotiation DataChannel
   private _ourDials = new WeakSet<DataConnection>();          // channels WE opened (vs received)
+  private _plainPeers = new Set<string>();                    // peers whose hello carried no E2EE
 
   constructor({ sfx = null, mic = null, e2ee = null, log = () => {}, config = CONFIG }: MeshOptions = {}) {
     this.sfx = sfx;
@@ -297,6 +298,7 @@ export class Mesh {
     this.slot = -1;
     this.knownOccupied.clear();
     this._sasPrints.clear();
+    this._plainPeers.clear();
     set({ joined: false, connected: false, sas: null });
   }
 
@@ -607,6 +609,7 @@ export class Mesh {
     });
     this._watchIce(call, slot);
     this._wireSas(call, leg);
+    this._armSenderCrypto(leg);
     this._negotiateCrypto(call, leg);
     this._armNeverConnected(call, leg);
     this._emitCrypto();
@@ -877,6 +880,23 @@ export class Mesh {
     if (!leg || !this.legs.has(leg.call.peer)) { this._emitCrypto(); return; }
     const e2ee = this.e2ee;
     const capable = remoteCapable && !!e2ee;
+    /* Plain-peer rebuild, checked BEFORE the settle guard: an earlier settle
+       ("no data channel", handshake timeout) already published crypto=false,
+       so waiting for `leg.crypto !== capable` would skip the one case that
+       has to act — the peer answering, late, that it has no transforms. */
+    if (e2ee && !capable && why === 'peer lacks transforms' && leg._cryptoArmed) {
+      /* We armed the transforms at leg creation, before the answer could
+         tell us the peer has none — and a transform cannot be taken back
+         once media has flowed. Remember the peer and rebuild the leg
+         untransformed, so it degrades to SRTP instead of the peer
+         dropping every frame we send. */
+      this._plainPeers.add(leg.call.peer as string);
+      this.log(`UNIT-${leg.slot} — PEER LACKS TRANSFORMS — REBUILDING LEG UNENCRYPTED`, 'warn');
+      const slot = leg.slot;
+      this._dropLeg(leg);
+      setTimeout(() => { if (!this._destroyed) this._dialListen(slot); }, 1500);
+      return;
+    }
     if (leg.crypto !== capable) {
       if (capable && e2ee) {
         // Badge stays pending until the transforms actually attach.
@@ -937,6 +957,46 @@ export class Mesh {
       pc.addEventListener('track', (ev) => { e2ee.secureReceiver(ev.receiver).catch(() => {}); });
     };
     return run();
+  }
+
+  /**
+   * Wire the outbound transform at LEG CREATION, not after the handshake.
+   *
+   * Chromium ignores a transform assigned to a sender that has already
+   * started sending: measured on this repo's engine — `onrtctransform` never
+   * fires and the worker sees zero frames, so the whole session went out in
+   * cleartext while the LCD read "E2E ARMED". A peer whose receiver DID
+   * transform then discarded every cleartext frame (FRAME DROPS climbing at
+   * the frame rate) and the cross-engine user heard nothing. WebKit applies
+   * a late attach, which is why the two engines disagreed.
+   *
+   * Here the leg has just been created and no frame can have left yet: media
+   * only flows once ICE and DTLS complete, long after this line.
+   */
+  private _armSenderCrypto(leg: Leg): void {
+    const e2ee = this.e2ee;
+    const id = leg.call.peer as string;
+    if (!e2ee || this._plainPeers.has(id)) return;
+    const pc = leg.call.peerConnection as RTCPeerConnection | null | undefined;
+    if (!pc) return;
+    const sender = this._senderFor(pc);
+    if (sender) {
+      leg._cryptoArmed = true;
+      e2ee.secureSender(sender).catch((err: unknown) => {
+        this.log(`UNIT-${leg.slot} — E2EE SENDER ATTACH FAILED — ${(err as Error)?.message ?? err}`, 'warn');
+      });
+    }
+    /* Receivers: the answerer already has one — PeerJS applies the remote
+       description inside answer(), so its 'track' event fired before this
+       leg was registered. The dialer gets its track later, with the answer.
+       Both must be armed before the first frame, for the same reason. */
+    for (const r of pc.getReceivers()) {
+      e2ee.secureReceiver(r).catch(() => { /* the handshake path retries + logs */ });
+    }
+    pc.addEventListener('track', (ev) => {
+      if (this._plainPeers.has(id)) return;
+      e2ee.secureReceiver(ev.receiver).catch(() => { /* the handshake path retries + logs */ });
+    });
   }
 
   _emitCrypto(): void {
