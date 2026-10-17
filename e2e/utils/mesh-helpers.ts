@@ -50,7 +50,12 @@ export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
           legs?: Map<string, {
             slot: number;
             crypto: boolean | null;
-            call: { peer?: string; peerConnection?: RTCPeerConnection | null };
+            recvonly?: boolean;
+            call: {
+              peer?: string;
+              peerConnection?: RTCPeerConnection | null;
+              dataChannel?: { readyState?: string } | null;
+            };
           }>;
         };
       }).mesh;
@@ -61,6 +66,11 @@ export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
         const pc = leg.call?.peerConnection ?? null;
         let detail = 'no peerConnection';
         if (pc) {
+          /* sctp.state is the decisive stat when media is up but the crypto
+             DataChannel never opens: 'connecting' with ice=connected and
+             bytes flowing means the data transport itself never came up,
+             which no amount of app-side waiting fixes. */
+          const sctp = (pc as RTCPeerConnection & { sctp?: { state?: string } }).sctp;
           const stats = await pc.getStats();
           let pairs = 0, candidates = 0, sent = 0, recv = 0, frames = 0;
           stats.forEach((r) => {
@@ -78,6 +88,7 @@ export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
           });
           detail =
             `pc=${pc.connectionState}/ice=${(pc as RTCPeerConnection & { iceConnectionState?: string }).iceConnectionState}` +
+            ` sctp=${sctp?.state ?? 'none'} dc=${leg.call?.dataChannel?.readyState ?? 'none'}` +
             ` senders=${pc.getSenders().length} receivers=${pc.getReceivers().length}` +
             ` txTransform=${pc.getSenders().filter((s) => 'transform' in s).length}` +
             ` rxTransform=${pc.getReceivers().filter((r) => 'transform' in r).length}` +

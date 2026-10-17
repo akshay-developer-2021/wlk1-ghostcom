@@ -616,11 +616,18 @@ export class Mesh {
 
   /** The one teardown for a dead leg — same body the call close path
       always ran. The crypto DataChannel close invokes it too: on WebKit
-      remote destroy reliably closes only the dc, never the call. */
+      remote destroy reliably closes only the dc, never the call.
+
+      Idempotent, and the map entry goes FIRST: closing the call fires
+      PeerJS 'close'/'error' synchronously, and while the leg was still in
+      the map those handlers passed their staleness guards and ran this whole
+      body a second time — two LINK DROPPED lines, two link-lost sounds, two
+      state writes for one dead link. */
   private _dropLeg(leg: Leg, why = `LINK DROPPED — UNIT-${leg.slot}`): void {
     const call = leg.call;
     const id = call.peer as string;
-    try { call.close(); } catch { /* noop */ }
+    if (this.legs.get(id) !== leg) return;   // already retired (re-entrant close)
+    this.legs.delete(id);
     clearTimeout(leg._cryptoTimer);
     clearTimeout(leg._neverTimer);
     clearTimeout(leg._wireTimer);
@@ -632,13 +639,13 @@ export class Mesh {
         if (leg._sasListeners.conn) pc.removeEventListener('connectionstatechange', leg._sasListeners.conn);
       }
     }
-    this.legs.delete(id);
     this._sasPrints.delete(id);
     this._closeDataConnFor(id);
     removePeer(leg.slot);
     this.log(why, 'warn');
     this.sfx?.linkLost();
     this._emitCrypto();
+    try { call.close(); } catch { /* noop */ }   // last: its events now see no leg
   }
 
   /** DataConn hygiene: close + drop the peer's crypto channel, but only
@@ -732,10 +739,13 @@ export class Mesh {
     else if (leg.dcOwner) { clearTimeout(leg._cryptoTimer); this._settleCrypto(leg, false, 'no data channel'); }
 
     /* Wire-strand: a leg whose crypto channel never OPENED cannot carry
-       BYE/handshake/closes — on engines where the dc builds late (WebKit),
-       a departed peer would otherwise wedge one side forever. If the
-       channel still is not open ~8s after negotiation, tear the leg down
-       and redial; a true peer-unavailable then evicts the slot. */
+       BYE/handshake/closes. A leg that never proved life is torn down and
+       redialled — there is nothing to preserve, and ICE reports a departed
+       peer within seconds. A leg that IS carrying audio is not touched: an
+       engine that never builds the channel would otherwise turn a working
+       link into a redial loop every 8s, which is exactly what Firefox+Chromium
+       did. Audio arriving is proof of life; the cost is the presence
+       side-channel, and the badge says so. */
     clearTimeout(leg._wireTimer);
     leg._wireOpen = false;
     leg._wireTimer = setTimeout(() => {
@@ -743,6 +753,12 @@ export class Mesh {
       if (leg._wireOpen) return;
       const conn = this._dataConns.get(call.peer);
       if (conn && (conn as unknown as { open?: boolean }).open) return;
+      if (state.peers.get(leg.slot)?.linked) {
+        leg.crypto = false;
+        this.log(`UNIT-${leg.slot} — DATA CHANNEL NEVER OPENED — SRTP LEG KEPT`, 'warn');
+        this._emitCrypto();
+        return;
+      }
       this._bumpDialFail(leg.slot);
       this._retire(leg, `WIRE NEVER-OPENED — REDIAL UNIT-${leg.slot}`);
     }, 8_000);
