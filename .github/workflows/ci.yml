@@ -76,9 +76,14 @@ jobs:
   # DataChannel deadlock that looped Brave<->Firefox forever passed every
   # chromium lane and every webkit lane. Enforced: both pairings, both ways.
   e2e-cross-engine:
+    # A cross-engine session launches TWO whole browsers on top of the one
+    # Playwright runs, and a stock runner (~4GB, all three engines installed)
+    # kills the second at launch. max-parallel: 1 keeps two runners from
+    # competing as well.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         pair:
           - chromium:webkit
