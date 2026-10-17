@@ -70,6 +70,11 @@ jobs:
       - run: npx playwright install --with-deps chromium webkit ${{ matrix.browser }}
       - run: npm run build
       - run: npm run test:e2e:${{ matrix.browser }}
+      # The app's mesh log is the only evidence a Firefox failure has:
+      # which leg never dialed, and why. Written per test, kept out of stdout.
+      - name: app log
+        if: failure()
+        run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || cat test-results/logs/*.jsonl
 
   # Cross-engine sessions: the pair real users actually produce. Same-engine
   # lanes cannot see bugs that only appear when the two ends differ — the
@@ -102,3 +107,6 @@ jobs:
         env:
           E2E_CROSS_PAIRS: ${{ matrix.pair }}
           E2E_BATCH: 1
+      - name: app log
+        if: failure()
+        run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || cat test-results/logs/*.jsonl
