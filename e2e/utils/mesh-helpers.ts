@@ -1,4 +1,5 @@
 import { Page, expect } from '@playwright/test';
+import { execSync } from 'node:child_process';
 import {
   injectTxTrack,
   startTx,
@@ -534,12 +535,23 @@ export async function toneRoundTrip(
   }
 
   await injectTxTrack(pageTx, freq, holdMs + 1500);
-  /* Every attempt, green or red: the rate the engine actually opened. The
-     failure message carries it too, but a GREEN run's rate is what proves a
-     48000 sink apart from a 44100 one. */
-  console.log(`[tone] ${label} sender ctx ${await pageTx.evaluate(
-    () => (window as unknown as { __testTxRate?: number }).__testTxRate ?? null,
-  )}Hz`);
+  /* Every attempt, green or red: the rate the engine actually opened, the
+     context's own latency figures, and how many playback streams the test
+     HOST can see on the sound server. A page whose audio unit fell back to an
+     internal emulated device still renders (a fresh tap, an advancing clock)
+     while its outbound track hands the encoder uninitialized data — the one
+     signature every red run so far has — and the sink-input count is what
+     tells that state apart from a healthy one. */
+  const txAudio = await pageTx.evaluate(() => {
+    const w = window as unknown as { __testTxRate?: number; __testTxCtx?: AudioContext };
+    const c = w.__testTxCtx as unknown as { state?: string; baseLatency?: number; outputLatency?: number } | undefined;
+    return { rate: w.__testTxRate ?? null, state: c?.state ?? 'none', base: c?.baseLatency ?? null, out: c?.outputLatency ?? null };
+  });
+  let sinkInputs = 'host pactl unavailable';
+  try {
+    sinkInputs = execSync('timeout 5 pactl list short sink-inputs | wc -l', { timeout: 15000 }).toString().trim();
+  } catch { /* no pulse on this lane: the failure message will say so */ }
+  console.log(`[tone] ${label} ${JSON.stringify(txAudio)} sinkInputs=${sinkInputs}`);
   await startTx(pageTx);
   const txTrack = await senderTrackId(pageTx);   // beginTx awaited replaceTrack
 
@@ -581,12 +593,26 @@ export async function toneRoundTrip(
       const tracks = src?.getAudioTracks?.() ?? [];
       return { tracks: tracks.length, settings: tracks[0]?.getSettings?.() ?? null };
     }, senderSlot);
+    /* The sound server as the test HOST sees it. If the sender page's
+       playback streams are missing here in a failing run, the page was
+       rendering on a fallback — the engine's own device never opened. */
+    const audioDevice = (() => {
+      try {
+        return execSync(
+          'timeout 5 pactl list short sinks; echo --; timeout 5 pactl list short sink-inputs; echo --; timeout 5 pactl info | grep -E "Default Sink|Server Name"',
+          { timeout: 20000 },
+        ).toString().trim();
+      } catch (e) {
+        return `pactl unavailable: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`;
+      }
+    })();
     throw new Error(
       `tone ${freq}Hz (${label}) — analysis ${JSON.stringify(analysis)} (sender AudioContext ${txRate}Hz)\n` +
       `generator (tap on its own context): ${txTone ? JSON.stringify(txTone) : 'not captured'}\n` +
       `carrier baseline (silent, pre-PTT, same wire): ${baseline ? JSON.stringify(baseline) : 'not captured'}\n` +
       `sender track: carrier ${carrierTrack} → during TX ${txTrack}; injected ${sender.injected} (${sender.readyState})\n` +
       `receiver tracks: ${JSON.stringify(rxCaps)}\n` +
+      `host audio device:\n${audioDevice}\n` +
       `── TX ──\n${tx}\n── RX ──\n${rx}`,
     );
   }
