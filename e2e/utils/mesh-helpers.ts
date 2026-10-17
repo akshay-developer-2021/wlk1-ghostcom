@@ -10,6 +10,7 @@ import {
   verifyAudio,
   saveAudio,
 } from '../fixtures/audio';
+import type { AudioAnalysis } from '../fixtures/audio';
 
 /** Wait for an open broker connection.
     NOTE: waitForFunction(fn, arg, options) — options are THIRD. Passed
@@ -510,15 +511,31 @@ export async function toneRoundTrip(
      injected one say whether the tone ever reached the sender at all —
      a different question from the engine mangling a tone it was given. */
   const carrierTrack = await senderTrackId(pageTx);
-  await injectTxTrack(pageTx, freq, holdMs + 1500);
-  await startTx(pageTx);
-  const txTrack = await senderTrackId(pageTx);   // beginTx awaited replaceTrack
 
   /* The sender's slot picks which remote stream the receiver records — the
      one thing that matters as soon as a receiver has more than one peer. */
   const senderSlot = await pageTx.evaluate(
     () => (window as unknown as { mesh?: { slot?: number } }).mesh?.slot ?? 0,
   );
+
+  /* Baseline, before PTT: the leg carries the app's own SILENT carrier, made
+     in a JS AudioContext exactly like the tone. If that already arrives as
+     the same garbage the tone run later fails with, then this engine mangled
+     everything JS-sourced that run and the swap is innocent. If it arrives
+     silent while the tone fails, the swap is where the tone was lost.
+     Diagnostic only — the tone assertion below is the one that must hold. */
+  let baseline: AudioAnalysis | null = null;
+  try {
+    const b = await startRecording(pageRx, senderSlot);
+    await pageRx.waitForTimeout(700);
+    baseline = await analyzeAudio(pageRx, await stopRecording(pageRx, b));
+  } catch {
+    baseline = null; // no carrier on the receiver yet: the tone test reports that
+  }
+
+  await injectTxTrack(pageTx, freq, holdMs + 1500);
+  await startTx(pageTx);
+  const txTrack = await senderTrackId(pageTx);   // beginTx awaited replaceTrack
 
   await pageRx.waitForTimeout(400); // let the track reach the sender chain
   const handle = await startRecording(pageRx, senderSlot);
@@ -561,6 +578,7 @@ export async function toneRoundTrip(
     throw new Error(
       `tone ${freq}Hz (${label}) — analysis ${JSON.stringify(analysis)} (sender AudioContext ${txRate}Hz)\n` +
       `generator (tap on its own context): ${txTone ? JSON.stringify(txTone) : 'not captured'}\n` +
+      `carrier baseline (silent, pre-PTT, same wire): ${baseline ? JSON.stringify(baseline) : 'not captured'}\n` +
       `sender track: carrier ${carrierTrack} → during TX ${txTrack}; injected ${sender.injected} (${sender.readyState})\n` +
       `receiver tracks: ${JSON.stringify(rxCaps)}\n` +
       `── TX ──\n${tx}\n── RX ──\n${rx}`,
