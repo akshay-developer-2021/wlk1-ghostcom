@@ -73,7 +73,7 @@ export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
              which no amount of app-side waiting fixes. */
           const sctp = (pc as RTCPeerConnection & { sctp?: { state?: string } }).sctp;
           const stats = await pc.getStats();
-          let pairs = 0, candidates = 0, sent = 0, recv = 0, frames = 0;
+          let pairs = 0, candidates = 0, sent = 0, recv = 0, frames = 0, lost = 0, concealed = 0, samples = 0;
           stats.forEach((r) => {
             const v = r as unknown as Record<string, number | string>;
             if (r.type === 'candidate-pair' && v.state === 'succeeded') pairs++;
@@ -85,6 +85,13 @@ export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
                  which report framesDecoded — reading only frameCount prints a
                  confident 0 for a leg that delivered bytes. */
               frames = Math.max(frames, Number(v.frameCount ?? 0), Number(v.framesDecoded ?? 0));
+              /* What the decoder had to invent. A leg carrying a buzz instead
+                 of a tone looks identical in bytesSent; concealedSamples and
+                 packetsLost say whether the wire lost audio or carried
+                 garbage in good packets. */
+              lost += Number(v.packetsLost ?? 0);
+              concealed += Number(v.concealedSamples ?? 0);
+              samples += Number(v.totalSamplesReceived ?? 0);
             }
           });
           detail =
@@ -96,7 +103,8 @@ export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
                attached", which cost a triage round trip. */
             ` txTransform=${pc.getSenders().filter((s) => (s as { transform?: unknown }).transform != null).length}` +
             ` rxTransform=${pc.getReceivers().filter((r) => (r as { transform?: unknown }).transform != null).length}` +
-            ` candidates=${candidates} pairs=${pairs} bytesSent=${sent} bytesRecv=${recv} frames=${frames}`;
+            ` candidates=${candidates} pairs=${pairs} bytesSent=${sent} bytesRecv=${recv} frames=${frames}` +
+            ` lost=${lost} concealed=${concealed} samples=${samples}`;
         }
         legs.push(`UNIT-${leg.slot} crypto=${String(leg.crypto)} ${detail}`);
       }
@@ -460,6 +468,28 @@ export async function assertWireHonest(
  * DURING the transmission, then verify frequency/level/duration.
  * (Sequential ptt-then-record can never catch the tone.)
  */
+/** The audio track a page's leg senders hold right now — what the wire is
+    actually able to carry. 'none' when no leg has an audio sender. */
+async function senderTrackId(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const w = window as unknown as { mesh?: { legs?: Map<string, { call?: { peerConnection?: RTCPeerConnection } }> } };
+    for (const leg of w.mesh?.legs?.values() ?? []) {
+      for (const s of leg.call?.peerConnection?.getSenders() ?? []) {
+        if (s.track && s.track.kind === 'audio') return s.track.id;
+      }
+    }
+    return 'none';
+  });
+}
+
+/**
+ * The tone through the wire, recorded on the receiver, asserted against the
+ * generator's own output.
+ *
+ * Read order matters: the carrier it replaces and the track held DURING TX are
+ * recorded while they are true. Sampling these after endTx (as an earlier
+ * version did) always finds the carrier back in place and says nothing.
+ */
 export async function toneRoundTrip(
   pageTx: Page,
   pageRx: Page,
@@ -467,8 +497,14 @@ export async function toneRoundTrip(
   holdMs: number,
   label: string,
 ): Promise<void> {
+  /* The track the leg holds BEFORE PTT, and the one it holds after beginTx
+     resolved. If the wire later carries noise, these two ids with the
+     injected one say whether the tone ever reached the sender at all —
+     a different question from the engine mangling a tone it was given. */
+  const carrierTrack = await senderTrackId(pageTx);
   await injectTxTrack(pageTx, freq, holdMs + 1500);
   await startTx(pageTx);
+  const txTrack = await senderTrackId(pageTx);   // beginTx awaited replaceTrack
 
   /* The sender's slot picks which remote stream the receiver records — the
      one thing that matters as soon as a receiver has more than one peer. */
@@ -502,19 +538,10 @@ export async function toneRoundTrip(
     const txRate = await pageTx.evaluate(
       () => (window as unknown as { __testTxRate?: number }).__testTxRate ?? null,
     );
-    /* Which track the sender's PC actually holds: an app that failed to
-       attach the tone keeps the silent carrier, which is a different bug
-       from an engine that mangles the tone it was given. */
+    /* The injected track, as the sender page itself sees it. */
     const sender = await pageTx.evaluate(() => {
-      const w = window as unknown as {
-        mesh?: { legs?: Map<string, { call?: { peerConnection?: RTCPeerConnection } }> };
-        __testTxTrack?: MediaStreamTrack;
-      };
-      const held: string[] = [];
-      for (const leg of w.mesh?.legs?.values() ?? []) {
-        for (const s of leg.call?.peerConnection?.getSenders() ?? []) held.push(s.track?.id ?? 'none');
-      }
-      return { injected: w.__testTxTrack?.id ?? 'none', readyState: w.__testTxTrack?.readyState ?? 'none', held };
+      const w = window as unknown as { __testTxTrack?: MediaStreamTrack };
+      return { injected: w.__testTxTrack?.id ?? 'none', readyState: w.__testTxTrack?.readyState ?? 'none' };
     });
     /* What the receiver ended up with on that leg, in its own words. */
     const rxCaps = await pageRx.evaluate((slot: number) => {
@@ -526,7 +553,7 @@ export async function toneRoundTrip(
     throw new Error(
       `tone ${freq}Hz (${label}) — analysis ${JSON.stringify(analysis)} (sender AudioContext ${txRate}Hz)\n` +
       `generator (tap on its own context): ${txTone ? JSON.stringify(txTone) : 'not captured'}\n` +
-      `sender tracks: injected ${sender.injected} (${sender.readyState}) vs PC holds ${JSON.stringify(sender.held)}\n` +
+      `sender track: carrier ${carrierTrack} → during TX ${txTrack}; injected ${sender.injected} (${sender.readyState})\n` +
       `receiver tracks: ${JSON.stringify(rxCaps)}\n` +
       `── TX ──\n${tx}\n── RX ──\n${rx}`,
     );
