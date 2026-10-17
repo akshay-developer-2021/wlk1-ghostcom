@@ -52,7 +52,7 @@ const sinks = () => dom.document.querySelectorAll('audio[data-remote]');
 
 describe('remote audio sink', () => {
   it('creates one element per linked slot and wires the analyser', () => {
-    setPeer(3, { linked: true, stream: stream('s3') });
+    setPeer(3, { linked: true, stream: stream('s3'), crypto: true });
     expect(sinks()).toHaveLength(1);
     expect(sinks()[0].dataset.remote).toBe('3');
     expect(sinks()[0].srcObject.tag).toBe('s3');
@@ -60,21 +60,21 @@ describe('remote audio sink', () => {
   });
 
   it('does not rebuild the analyser tap on unrelated peers ticks', () => {
-    setPeer(3, { linked: true, stream: stream('s3') });
+    setPeer(3, { linked: true, stream: stream('s3'), crypto: true });
     setPeer(3, { speaking: true });        // same stream, new tick
     expect(taps.registered).toEqual([3]);  // still one tap
     expect(sinks()[0].srcObject.tag).toBe('s3');
   });
 
   it('rebuilds the tap when the stream is swapped', () => {
-    setPeer(3, { linked: true, stream: stream('first') });
-    setPeer(3, { linked: true, stream: stream('second') });
+    setPeer(3, { linked: true, stream: stream('first'), crypto: true });
+    setPeer(3, { linked: true, stream: stream('second'), crypto: true });
     expect(sinks()[0].srcObject.tag).toBe('second');
     expect(taps.registered).toEqual([3, 3]);
   });
 
   it('removes the element and tap when a peer unlinks', () => {
-    setPeer(3, { linked: true, stream: stream('s3') });
+    setPeer(3, { linked: true, stream: stream('s3'), crypto: true });
     removePeer(3);
     expect(sinks()).toHaveLength(0);
     expect(taps.unregistered).toEqual([3]);
@@ -86,12 +86,12 @@ describe('remote audio sink', () => {
   });
 
   it('applies the current volume to new sinks', () => {
-    setPeer(1, { linked: true, stream: stream('s1') });
+    setPeer(1, { linked: true, stream: stream('s1'), crypto: true });
     expect(sinks()[0].volume).toBe(0.5);
   });
 
   it('replays playback for every sink', () => {
-    setPeer(1, { linked: true, stream: stream('s1') });
+    setPeer(1, { linked: true, stream: stream('s1'), crypto: true });
     const el = sinks()[0];
     let played = 0;
     el.playImpl = () => { played++; return Promise.resolve(); };
@@ -139,13 +139,15 @@ describe('playback gate — never play un-decrypted frames', () => {
     expect(sinks()[0].muted).toBe(true);
   });
 
-  it('unmutes once crypto settles true, without rebuilding the tap', () => {
+  it('unmutes once crypto settles true, attaching the tap exactly once', () => {
     setPeer(6, { linked: true, stream: stream('s6'), crypto: null });
     const before = taps.registered.length;
     expect(sinks()[0].muted).toBe(true);
     setPeer(6, { crypto: true });                 // handshake landed
     expect(sinks()[0].muted).toBe(false);
-    expect(taps.registered.length).toBe(before);  // same stream — no re-tap
+    expect(taps.registered.length).toBe(before + 1);  // attached once, on settle
+    setPeer(6, { speaking: true });                // unrelated tick
+    expect(taps.registered.length).toBe(before + 1);  // same stream — no re-tap
   });
 
   it('replayAudio cannot unmute a blocked leg', () => {
@@ -158,5 +160,30 @@ describe('playback gate — never play un-decrypted frames', () => {
   it('a stream with no crypto field at all stays blocked (fail closed)', () => {
     setPeer(8, { linked: true, stream: stream('s8') });
     expect(sinks()[0].muted).toBe(true);
+  });
+});
+
+/* Regression: muting the <audio> element is NOT enough. The analyser tap
+   reads the SAME pre-decrypt stream, so raw AES-GCM read as permanent
+   speech — the VU bars, RX LED and status banner all lied and CI webkit
+   failed asserting the link text. The tap must be gated with playback. */
+describe('analyser tap follows the crypto gate', () => {
+  it('registers no tap while crypto is unsettled', () => {
+    setPeer(11, { linked: true, stream: stream('s11'), crypto: null });
+    expect(taps.registered).toEqual([]);       // ciphertext is not speech
+  });
+
+  it('attaches the tap once crypto settles true', () => {
+    setPeer(12, { linked: true, stream: stream('s12'), crypto: null });
+    expect(taps.registered).toEqual([]);
+    setPeer(12, { crypto: true });
+    expect(taps.registered).toEqual([12]);
+  });
+
+  it('drops the tap again if the leg re-negotiates to unsettled', () => {
+    setPeer(13, { linked: true, stream: stream('s13'), crypto: true });
+    expect(taps.registered).toEqual([13]);
+    setPeer(13, { crypto: null });
+    expect(taps.unregistered).toEqual([13]);
   });
 });

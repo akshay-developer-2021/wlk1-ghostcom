@@ -4,11 +4,15 @@ import { BASE_URL, USE_LOCAL_SERVER, IS_REMOTE } from './e2e/utils/env';
 const isCI = !!process.env['CI'];
 
 /* Chrome-only fake-device flags; Firefox/WebKit get an in-page getUserMedia
-   stub instead (see e2e/utils/media.ts). */
+   stub instead (see e2e/utils/media.ts). LocalNetworkAccessChecks: a deployed
+   https origin is blocked from wss://localhost by Chrome's local-network
+   policy — the remote recipe keeps the broker local + TLS, so the test
+   browser must allow it. */
 const CHROMIUM_ARGS = [
   '--use-fake-device-for-media-stream',
   '--use-fake-ui-for-media-stream',
   '--autoplay-policy=no-user-gesture-required',
+  '--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessRespectPreflightResults',
 ];
 
 const FIREFOX_PREFS = {
