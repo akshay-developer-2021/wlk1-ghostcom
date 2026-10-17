@@ -122,14 +122,30 @@ export function initRemoteAudio({ sfx, loop, getVolume }: RemoteAudioDeps): Remo
           unmuteHinted = true;
           toast('TAP TO UNMUTE');
         });
+        /* The analyser taps the SAME pre-decrypt stream the element plays.
+           Raw AES-GCM is broadband noise, so a tap on an un-decrypted leg
+           reads as permanent "someone is speaking" — the VU bars, the RX
+           LED and the status banner all lie. Gate the tap with playback:
+           no tap until crypto settles true, and drop it again if the leg
+           is re-negotiated back to unsettled. */
         const tap = analyserFor(stream);
-        if (tap) {
-          sinkTaps.set(slot, tap);
+        if (tap) sinkTaps.set(slot, tap);          // remembered even while blocked
+        if (tap && p.crypto === true) {
           loop.registerRemote(slot, tap.an, tap.src);
+        } else if (tap) {
+          /* keep the node but disconnect it from the graph */
+          try { tap.src.disconnect(); } catch { /* noop */ }
         }
         routeSink(slot, el);
       } else if (p.crypto === true ? cryptoBlocked.delete(slot) : cryptoBlocked.add(slot)) {
-        /* crypto settled after the stream landed — (un)mute accordingly */
+        /* crypto settled after the stream landed — (un)mute, and attach or
+           drop the tap so the VU/RX path matches what is actually audible */
+        if (p.crypto === true) {
+          const tap = sinkTaps.get(slot);
+          if (tap) loop.registerRemote(slot, tap.an, tap.src);
+        } else {
+          loop.unregisterRemote(slot);
+        }
         routeSink(slot, el);
       }
     }
