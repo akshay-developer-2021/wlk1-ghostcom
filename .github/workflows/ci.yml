@@ -98,9 +98,13 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        pair:
-          - chromium:webkit
-          - chromium:firefox
+        # `pair` is what the tests launch; `slug` is the same thing in the
+        # characters an artifact name allows (upload-artifact rejects a colon).
+        include:
+          - pair: chromium:webkit
+            slug: chromium-webkit
+          - pair: chromium:firefox
+            slug: chromium-firefox
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -132,7 +136,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: audio-${{ replace(matrix.pair, ':', '-') }}
+          name: audio-${{ matrix.slug }}
           path: test-results/audio
           if-no-files-found: ignore
 
