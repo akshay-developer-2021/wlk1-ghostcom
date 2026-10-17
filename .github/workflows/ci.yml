@@ -68,30 +68,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit ${{ matrix.browser }}
-      # Firefox's AudioContext never leaves "suspended" without an output
-      # device to open: the app's silent carrier never runs, the mesh refuses
-      # to dial, and every test fails at LNK 1 with "AUDIO NOT READY (ctx
-      # suspended)" and wire enc=0 dec=0. Prefs do not help (autoplay is not
-      # the blocker) and neither does ALSA — the firefox-audio-probe workflow
-      # measured both, and then measured that a PulseAudio server with a null
-      # SINK fixes 7/7 candidates. The sink is VERIFIED here, not hoped for:
-      # a masked failure in this step read as an app bug for a whole day.
-      # Scoped to Firefox lanes: the chromium and webkit lanes pass without it.
-      - name: give the runner an audio device
-        run: |
-          sudo apt-get install -y --no-install-recommends pulseaudio
-          export XDG_RUNTIME_DIR=/tmp/wlk1-pa
-          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-          pulseaudio --start --exit-idle-time=-1 --disallow-exit
-          pactl load-module module-null-sink sink_name=wlk1_dummy
-          pactl set-default-sink wlk1_dummy
-          pactl list short sinks
-          pactl list short sinks | grep -q wlk1_dummy || { echo "NO NULL SINK — Firefox has no audio device"; exit 1; }
-          # The browser is a PulseAudio CLIENT: it must find that server.
-          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
-          echo "PULSE_SERVER=unix:$XDG_RUNTIME_DIR/pulse/native" >> "$GITHUB_ENV"
+      # Firefox needs an output device or its AudioContext never leaves
+      # "suspended" (recipe, evidence and the one-step rule: see
+      # e2e/with-audio-device.sh). Setup and the tests must share ONE step —
+      # the PulseAudio daemon does not survive a step boundary.
       - run: npm run build
-      - run: npm run test:e2e:${{ matrix.browser }}
+      - name: firefox session — audio device + tests
+        run: e2e/with-audio-device.sh npm run test:e2e:${{ matrix.browser }}
+        env:
+          WLK1_AUDIO_DEVICE: '1'
       # The app's mesh log is the only evidence a Firefox failure has:
       # which leg never dialed, and why. Written per test, kept out of stdout.
       - name: app log
@@ -123,25 +108,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
-      - name: give the runner an audio device
-        if: contains(matrix.pair, 'firefox')
-        run: |
-          sudo apt-get install -y --no-install-recommends pulseaudio
-          export XDG_RUNTIME_DIR=/tmp/wlk1-pa
-          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-          pulseaudio --start --exit-idle-time=-1 --disallow-exit
-          pactl load-module module-null-sink sink_name=wlk1_dummy
-          pactl set-default-sink wlk1_dummy
-          pactl list short sinks
-          pactl list short sinks | grep -q wlk1_dummy || { echo "NO NULL SINK — Firefox has no audio device"; exit 1; }
-          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
-          echo "PULSE_SERVER=unix:$XDG_RUNTIME_DIR/pulse/native" >> "$GITHUB_ENV"
       - run: npm run build
+      # One step for the setup and the command: see e2e/with-audio-device.sh.
+      # Only the firefox pairing needs the device; the pair decides.
       - name: cross-engine session ${{ matrix.pair }}
-        run: npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium --workers=1
+        run: e2e/with-audio-device.sh npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium --workers=1
         env:
           E2E_CROSS_PAIRS: ${{ matrix.pair }}
           E2E_BATCH: 1
+          WLK1_AUDIO_DEVICE: ${{ contains(matrix.pair, 'firefox') && '1' || '0' }}
       - name: app log
         if: failure()
         run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || cat test-results/logs/*.jsonl
@@ -189,31 +164,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit firefox
-      # Firefox's AudioContext never leaves "suspended" without an output
-      # device to open: the app's silent carrier never runs, the mesh refuses
-      # to dial, and every test fails at LNK 1 with "AUDIO NOT READY (ctx
-      # suspended)" and wire enc=0 dec=0. Prefs do not help (autoplay is not
-      # the blocker) and neither does ALSA — the firefox-audio-probe workflow
-      # measured both, and then measured that a PulseAudio server with a null
-      # SINK fixes 7/7 candidates. The sink is VERIFIED here, not hoped for:
-      # a masked failure in this step read as an app bug for a whole day.
-      # Scoped to Firefox lanes: the chromium and webkit lanes pass without it.
-      - name: give the runner an audio device
-        run: |
-          sudo apt-get install -y --no-install-recommends pulseaudio
-          export XDG_RUNTIME_DIR=/tmp/wlk1-pa
-          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-          pulseaudio --start --exit-idle-time=-1 --disallow-exit
-          pactl load-module module-null-sink sink_name=wlk1_dummy
-          pactl set-default-sink wlk1_dummy
-          pactl list short sinks
-          pactl list short sinks | grep -q wlk1_dummy || { echo "NO NULL SINK — Firefox has no audio device"; exit 1; }
-          # The browser is a PulseAudio CLIENT: it must find that server.
-          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
-          echo "PULSE_SERVER=unix:$XDG_RUNTIME_DIR/pulse/native" >> "$GITHUB_ENV"
       - run: npm run build
-      - name: three-engine session
-        run: npm run test:e2e:triple
+      # One step for the setup and the command: see e2e/with-audio-device.sh.
+      - name: three-engine session — audio device + tests
+        run: e2e/with-audio-device.sh npm run test:e2e:triple
+        env:
+          WLK1_AUDIO_DEVICE: '1'
       - name: app log
         if: failure()
         run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || ls -R test-results
