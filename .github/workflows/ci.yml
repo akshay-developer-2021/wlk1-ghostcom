@@ -93,7 +93,7 @@ jobs:
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
       - name: cross-engine session ${{ matrix.pair }}
-        run: npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium
+        run: npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium --workers=1
         env:
           E2E_CROSS_PAIRS: ${{ matrix.pair }}
           E2E_BATCH: 1

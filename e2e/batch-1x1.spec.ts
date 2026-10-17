@@ -93,9 +93,13 @@ test(`1x1 batch: ${BATCH_SIZE} independent two-user sessions against ${BASE_URL}
  * These pair chromium with the project's other engines and assert the
  * whole radio path: join, indicators, tone across the mesh, honest leave.
  *
- * E2E_CROSS_PAIRS=chromium,webkit,firefox (default: the two that ship).
+ * Off unless E2E_CROSS_PAIRS is set: each session launches two whole
+ * browsers on top of the one Playwright already runs, and a runner with
+ * ~4GB will OOM ("Target page, context or browser has been closed").
+ * The cross-engine CI job runs this file alone for exactly that reason.
+ *   E2E_CROSS_PAIRS=chromium,webkit npm run test:e2e
  */
-const CROSS_PAIRS = (process.env['E2E_CROSS_PAIRS'] ?? 'chromium:webkit')
+const CROSS_PAIRS = (process.env['E2E_CROSS_PAIRS'] ?? '')
   .split(',')
   .map((p) => p.trim())
   .filter(Boolean);
