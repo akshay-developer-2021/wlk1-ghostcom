@@ -28,12 +28,18 @@ export function silentContextState(): string {
 
 /* Resume (or create) the shared silent AudioContext. Must run inside a
    user gesture on Safari, otherwise the context stays suspended and the
-   track never goes live — which breaks outbound legs cross-browser. */
-export function resumeContext(): void {
+   track never goes live — which breaks outbound legs cross-browser.
+   Resolves when the context RUNS: opening the output device takes a beat on
+   some engines (Firefox with a PulseAudio sink), and a caller that needs
+   audio has to act then, not when the tap landed. Resolves at once when the
+   context already runs, or when this engine has no AudioContext at all. */
+export function resumeContext(): Promise<void> {
   try {
-    if (!silentCtx) { getSilentTrack(); return; }
-    if (silentCtx.state === 'suspended') silentCtx.resume().catch(() => {});
-  } catch { /* noop */ }
+    if (!silentCtx) getSilentTrack();          // creates it and kicks a resume
+    if (!silentCtx) return Promise.resolve();  // no AudioContext on this engine
+    if (silentCtx.state !== 'suspended') return Promise.resolve();
+    return silentCtx.resume().catch(() => { /* noop */ });
+  } catch { return Promise.resolve(); }
 }
 
 export function getSilentTrack(): MediaStreamTrack | null {

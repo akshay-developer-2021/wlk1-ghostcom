@@ -901,7 +901,18 @@ export class Mesh {
          redial that reuses this dc once the map entry is gone would
          have already freed a replacement. */
       this.log(`DC CLOSE — UNIT-${leg.slot}`, 'sys');
-      if (this._current(leg)) this._dropLeg(leg);
+      if (!this._current(leg)) return;
+      /* A dead wire is not a dead peer. PeerJS closes the channel whenever one
+         send fails, and WebKit refuses sends for a beat while its channel
+         settles (measured: the ack answering the peer's hello, "Error sending
+         binary data through RTCDataChannel") — which used to take a pair whose
+         audio was fine down with it. Media that is up keeps the leg; a
+         departed peer fails ICE, and that (or its BYE) is what retires it. */
+      if (state.peers.get(leg.slot)?.linked) {
+        this.log(`UNIT-${leg.slot} — WIRE LOST — SRTP LEG KEPT`, 'warn');
+        return;
+      }
+      this._dropLeg(leg);
     });
     conn.on('error', () => { this.log(`DC ERROR — UNIT-${leg.slot}`, 'warn'); /* media leg has its own error path */ });
   }

@@ -434,6 +434,24 @@ describe('crypto dataconn close — the cross-browser departure signal', () => {
     mesh.leave();
   });
 
+  it('a wire close on media that is up keeps the leg (a refused send, not a departure)', () => {
+    const { mesh, logs } = makeMesh();
+    const call = fakeCall('peer-4', fakeSender());
+    mesh._registerLeg(call, 4, 'listen');
+    const leg = mesh.legs.get('peer-4');
+    clearTimeout(leg._cryptoTimer);
+    mesh._onRemoteStream(4, { id: 'remote-stream' });   // media is proof of life
+    const conn = fakeConn('peer-4');
+    mesh._dataConns.set('peer-4', conn);
+    mesh._wireCryptoConn(conn, leg);
+
+    conn.fire('close');                                 // WebKit refused one send
+    expect(mesh.legs.has('peer-4')).toBe(true);         // the call outlives the wire
+    expect(call.close).not.toHaveBeenCalled();
+    expect(logs.some(([, m]) => m.includes('WIRE LOST — SRTP LEG KEPT'))).toBe(true);
+    mesh.leave();
+  });
+
   it('the wiring leg only dies while it is still current — a replacement survives', () => {
     const { mesh, logs } = makeMesh();
     const conn = fakeConn('peer-9');

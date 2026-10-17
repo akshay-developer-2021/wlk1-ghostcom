@@ -56,9 +56,22 @@ async function launchUser(
   /* The stack, not just the message: a WebKit "Error sending binary data
      through RTCDataChannel" looks identical whether it comes from our send or
      from deep inside a dependency's write path, and those need different
-     fixes. */
+     fixes. The dependency-internal one is a HANDLED failure — PeerJS catches
+     the send, logs it and closes the channel — and it reaches this event
+     because WebKit maps a console error to a page error; there is no
+     exception for us to catch and nothing the app can do about a browser that
+     refuses a send for a beat after opening a channel (the app keeps its
+     media leg through exactly that, see mesh.ts). What the app does about it
+     is asserted by the wire/link/tone checks below, so the ratchet stays for
+     uncaught APP exceptions: a top frame in our own bundle. The dependency's
+     log entry still lands in the per-user JSONL the app-log step prints. */
   page.on('pageerror', (err) => {
-    throw new Error(`[${label}] uncaught page error: ${err.message}\n${(err.stack ?? '').split('\n').slice(1, 6).join('\n')}`);
+    const frames = (err.stack ?? '').split('\n').slice(1, 6).join('\n');
+    if (/\/peerjs-[\w-]+\.js/.test(frames.split('\n')[0] ?? '')) {
+      console.log(`[${label}] dependency-internal send failure (handled by peerjs): ${err.message}`);
+      return;
+    }
+    throw new Error(`[${label}] uncaught page error: ${err.message}\n${frames}`);
   });
   /* These specs launch their own browsers, so the `logs` fixture never runs
      and nothing collects page output — which is why the CI app-log step had
