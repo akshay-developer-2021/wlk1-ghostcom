@@ -458,7 +458,7 @@ describe('ICE failure mid-TX — redial deferred, drained on endTx', () => {
     mesh.leave();
   });
 
-  it('disconnected ICE restarts first, then defers while TX is hot (fake timers)', async () => {
+  it('disconnected ICE restarts first; a stuck leg retires and its redial defers (fake timers)', async () => {
     vi.useFakeTimers();
     try {
       const { mesh } = makeMesh();
@@ -472,7 +472,10 @@ describe('ICE failure mid-TX — redial deferred, drained on endTx', () => {
         expect(mesh._pendingRedial.has(2)).toBe(false);             // still in grace window
         await vi.advanceTimersByTimeAsync(5000);                    // stuck past the window
         expect(mesh._pendingRedial.has(2)).toBe(true);              // deferred until TX end
-        expect(mesh.legs.has('peer-4')).toBe(true);                 // leg kept for the drain
+        /* Retired, not kept: _dialListen short-circuits while a leg still
+           holds the peer id, so a leg parked "for the drain" would have
+           blocked the very redial it was waiting for. */
+        expect(mesh.legs.has('peer-4')).toBe(false);
       } finally {
         set({ tx: false });
       }
