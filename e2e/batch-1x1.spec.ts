@@ -250,13 +250,24 @@ if (TRIPLE.length >= 3) {
       /* A real tone in every direction a recorder can measure. WebKit cannot
          decode its own MediaRecorder output, so a direction is unmeasurable
          exactly when the RECEIVER is WebKit — the mesh assertions above are
-         what cover those legs. */
+         what cover those legs.
+
+         Every direction runs before the test fails: the webkit-sent
+         directions share one sender process and differ only in the receiver,
+         so a single run then says which end mangled a bad tone. Failing on
+         the first one (as this did) threw the control away with the rest. */
+      const toneErrors: string[] = [];
       for (const sender of users) {
         for (const receiver of users) {
           if (sender === receiver || receiver.engine === 'webkit') continue;
-          await toneRoundTrip(sender.page, receiver.page, 1000, 2000, `triple-${sender.engine}-${receiver.engine}`);
+          try {
+            await toneRoundTrip(sender.page, receiver.page, 1000, 2000, `triple-${sender.engine}-${receiver.engine}`);
+          } catch (error) {
+            toneErrors.push(error instanceof Error ? error.message : String(error));
+          }
         }
       }
+      if (toneErrors.length > 0) throw new Error(toneErrors.join('\n\n'));
 
       /* One leaves. Both survivors stay on the air and each drops exactly one
          unit — a mesh that forgets a leaver, or collapses to zero, fails

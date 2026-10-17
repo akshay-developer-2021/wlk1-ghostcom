@@ -146,6 +146,95 @@ export async function measureTxTone(page: Page, samples = 6): Promise<{ freq: nu
   }, samples);
 }
 
+export interface RemoteTapView {
+  ctxState: string;
+  rate: number;
+  rms: number;    // mean per-window rms across the whole window
+  peak: number;
+  freq: number;   // zero-crossing estimate
+  windows: number;
+  seconds: number;
+}
+
+/**
+ * Listen to the DECODED remote track with Web Audio, in parallel with
+ * MediaRecorder.
+ *
+ * Both read the same received stream through different engine paths: the
+ * recorder muxes it into a file, the analyser reads the PCM the speakers get.
+ * When a recording says garbage while this says tone, the mux/record path
+ * produced the garbage, not the wire — a question no blob can answer on its
+ * own. Diagnostic only, never an assertion; the context state is reported so
+ * a tap that never ran cannot pass for silence.
+ */
+export async function startRemoteTap(page: Page, slot: number): Promise<string> {
+  const handle = `tap_${Date.now()}`;
+  await page.evaluate(({ handle: h, slot: s }: { handle: string; slot: number }) => {
+    const w = window as unknown as { [k: string]: unknown };
+    const el = document.querySelector(`audio[data-remote="${s}"]`) as HTMLAudioElement | null;
+    const stream = (el?.srcObject ?? null) as MediaStream | null;
+    if (!stream || stream.getAudioTracks().length === 0) throw new Error(`remote tap: no audio on slot ${s}`);
+    const ctx = new AudioContext();
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 8192;
+    analyser.smoothingTimeConstant = 0;
+    source.connect(analyser);
+    /* Connected on, like the sender's tap: an unconnected analyser may be
+       skipped by an engine and then read a false silence. */
+    analyser.connect(ctx.destination);
+    const bucket = new Float32Array(analyser.fftSize);
+    const acc = { rmsSum: 0, peak: 0, crossings: 0, samples: 0, windows: 0 };
+    const timer = setInterval(() => {
+      analyser.getFloatTimeDomainData(bucket);
+      let sum = 0;
+      let crossings = 0;
+      for (let i = 0; i < bucket.length; i++) {
+        const v = bucket[i]!;
+        sum += v * v;
+        if (i > 0 && (bucket[i - 1]! < 0) !== (v < 0)) crossings++;
+      }
+      const rms = Math.sqrt(sum / bucket.length);
+      acc.rmsSum += rms;
+      if (rms > acc.peak) acc.peak = rms;
+      acc.crossings += crossings;
+      acc.samples += bucket.length;
+      acc.windows++;
+    }, 50);
+    w[h] = { ctx, acc, timer };
+    void ctx.resume().catch(() => { /* reported through ctxState */ });
+  }, { handle, slot });
+  return handle;
+}
+
+/** Stop a remote tap and summarise what it heard. */
+export async function readRemoteTap(page: Page, handle: string): Promise<RemoteTapView> {
+  return page.evaluate((h: string) => {
+    const w = window as unknown as { [k: string]: unknown };
+    const t = w[h] as {
+      ctx: AudioContext;
+      acc: { rmsSum: number; peak: number; crossings: number; samples: number; windows: number };
+      timer: number;
+    } | undefined;
+    if (!t) throw new Error('remote tap handle missing');
+    clearInterval(t.timer);
+    delete w[h];
+    const rate = t.ctx.sampleRate || 48000;
+    const freq = t.acc.samples > 0 ? (t.acc.crossings * rate) / (2 * t.acc.samples) : 0;
+    const view = {
+      ctxState: t.ctx.state,
+      rate,
+      rms: Number((t.acc.rmsSum / Math.max(1, t.acc.windows)).toFixed(4)),
+      peak: Number(t.acc.peak.toFixed(4)),
+      freq: Math.round(freq),
+      windows: t.acc.windows,
+      seconds: Number((t.acc.samples / rate).toFixed(2)),
+    };
+    void t.ctx.close().catch(() => { /* best effort */ });
+    return view;
+  }, handle);
+}
+
 /** Record every remote audio element. Returns a stop handle. */
 export async function startRecording(page: Page, slot?: number): Promise<string> {
   const handle = `rec_${Date.now()}`;
