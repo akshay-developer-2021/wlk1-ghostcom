@@ -24,6 +24,9 @@ import type { Sfx } from '../audio/sfx.js';
 import type { E2EE } from '../security/e2ee.js';
 import type { LogKind } from '../../infra/dom/dom.js';
 
+/** Every wire message: a small JSON object sent as TEXT. */
+interface WireMsg { t: string; e2ee?: boolean; speaking?: boolean }
+
 export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mode: 'live'|'listen'; crypto: boolean|null; dcOwner?: boolean; recvonly?: boolean; _cryptoArmed?: boolean; _cryptoTimer?: any; _neverTimer?: any; _wireTimer?: any; _wireOpen?: boolean; _sasDone?: boolean; _sasListeners?: { ice: (() => void) | null; conn: (() => void) | null } }
 
 export interface TxReport { attached: number; redialed: number }
@@ -782,15 +785,33 @@ export class Mesh {
     }, 8_000);
   }
 
+  /** The only way a message reaches a peer. */
+  private _wireSend(conn: DataConnection, msg: WireMsg): void {
+    try { conn.send(JSON.stringify(msg)); } catch { /* noop */ }
+  }
+
   _wireCryptoConn(conn: DataConnection, leg: Leg): void {
     conn.on('open', () => {
       leg._wireOpen = true;
       clearTimeout(leg._wireTimer);
-      try { conn.send({ t: 'wlk1-hello', e2ee: !!this.e2ee }); } catch { /* noop */ }
+      this._wireSend(conn, { t: 'wlk1-hello', e2ee: !!this.e2ee });
       this.log(`CHANNEL OPEN — UNIT-${leg.slot}`, 'sys');
     });
     conn.on('data', (d: unknown) => {
-      const m = (d ?? null) as { t?: unknown; e2ee?: unknown; speaking?: unknown } | null;
+      /* Every wire message is JSON TEXT. DataChannel.send() takes a string,
+         Blob or buffer — handing it a plain object goes through PeerJS's
+         binary packer, and WebKit rejects the result with "Error sending
+         binary data through RTCDataChannel" (it surfaced as an uncaught page
+         error and took down a three-peer session). Strings are what the
+         platform contract says, and they are identical on every engine.
+         A peer running an older build may still send a packed object, so
+         both shapes are accepted on the way in. */
+      let m: WireMsg | null = null;
+      if (typeof d === 'string') {
+        try { m = JSON.parse(d) as WireMsg; } catch { return; }
+      } else if (d && typeof d === 'object') {
+        m = d as WireMsg;
+      }
       if (!m || typeof m.t !== 'string') return;
       /* remote departed gracefully — same teardown as a dc close */
       if (m.t === 'wlk1-bye') {
@@ -804,7 +825,7 @@ export class Mesh {
         return;
       }
       if (m.t !== 'wlk1-hello' && m.t !== 'wlk1-ack') return;
-      if (m.t === 'wlk1-hello') { try { conn.send({ t: 'wlk1-ack', e2ee: !!this.e2ee }); } catch { /* noop */ } }
+      if (m.t === 'wlk1-hello') this._wireSend(conn, { t: 'wlk1-ack', e2ee: !!this.e2ee });
       clearTimeout(leg._cryptoTimer);
       this._settleCrypto(leg, !!m.e2ee, m.e2ee ? '' : 'peer lacks transforms');
     });
@@ -825,7 +846,7 @@ export class Mesh {
     for (const [, conn] of this._dataConns) {
       try {
         const dc = conn as unknown as { open?: boolean; send?: (m: unknown) => void };
-        if (dc && dc.open && typeof dc.send === 'function') conn.send({ t: 'wlk1-speaking', speaking: on });
+        if (dc && dc.open && typeof dc.send === 'function') this._wireSend(conn, { t: 'wlk1-speaking', speaking: on });
       } catch { /* noop */ }
     }
   }
@@ -837,7 +858,7 @@ export class Mesh {
       try {
         const dc = conn as unknown as { open?: boolean };
         if (dc && dc.open) {
-          conn.send({ t: 'wlk1-bye' });
+          this._wireSend(conn, { t: 'wlk1-bye' });
           this.log(`BYE SENT — ${conn.peer}`, 'sys');
         }
       } catch { /* noop */ }

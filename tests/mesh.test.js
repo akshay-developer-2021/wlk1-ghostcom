@@ -376,7 +376,7 @@ describe('crypto dataconn close — the cross-browser departure signal', () => {
     mesh._wireCryptoConn(conn, mesh.legs.get('peer-4'));
 
     mesh.leave();
-    expect(sent.some((m) => m && m.t === 'wlk1-bye')).toBe(true);
+    expect(sent.some((m) => { try { return JSON.parse(m).t === 'wlk1-bye'; } catch { return false; } })).toBe(true);
     expect(mesh.legs.size).toBe(0);
   });
 });
@@ -912,10 +912,40 @@ describe('DataChannel ownership (single dialer per leg pair)', () => {
     mesh._onDataConn(dc);
     dc.fire('open');
     expect(leg._wireOpen).toBe(true);
-    expect(dc.sent[0]).toMatchObject({ t: 'wlk1-hello' });
+    expect(JSON.parse(dc.sent[0])).toMatchObject({ t: 'wlk1-hello' });
     dc.fire('data', { t: 'wlk1-ack', e2ee: false });    // handshake completes
     expect(leg.crypto).toBe(false);                    // honest: no transforms
     mesh.leave();
+  });
+
+  /* WebKit rejects a DataChannel.send() of anything but text/blob/binary with
+     "Error sending binary data through RTCDataChannel", which surfaced as an
+     uncaught page error that killed a three-peer session. Every message goes
+     out as JSON text. */
+  it('every wire message is sent as JSON text, never a raw object', () => {
+    const { mesh } = makeMesh();
+    const conn = fakeConn('peer-4');
+    mesh._dataConns.set('peer-4', conn);
+    mesh._registerLeg(fakeCall('peer-4', fakeSender()), 4, 'listen');
+    mesh._wireCryptoConn(conn, mesh.legs.get('peer-4'));
+
+    conn.fire('open');
+    conn.open = true;                       // presence only rides an open channel
+    conn.fire('data', JSON.stringify({ t: 'wlk1-hello', e2ee: true }));
+    mesh.sendSpeaking(true);
+    mesh.leave();
+
+    expect(conn.sent.length).toBeGreaterThan(1);
+    for (const msg of conn.sent) {
+      expect(typeof msg, `sent a ${typeof msg}, not text`).toBe('string');
+      expect(() => JSON.parse(msg)).not.toThrow();
+    }
+    /* registration already wires the channel, so ordering across handlers is
+       not the claim here — the message TYPES are. */
+    const kinds = conn.sent.map((m) => JSON.parse(m).t);
+    expect(kinds).toContain('wlk1-hello');
+    expect(kinds).toContain('wlk1-ack');
+    expect(kinds).toContain('wlk1-speaking');
   });
 
   it('a competing channel never wins by arriving first — the opener wins', () => {
