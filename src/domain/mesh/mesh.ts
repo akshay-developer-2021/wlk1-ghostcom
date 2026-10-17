@@ -741,6 +741,14 @@ export class Mesh {
     }
     if (!conn && leg.dcOwner && this.peer && !this.peer.destroyed && !this._destroyed) {
       try {
+        /* JSON, not PeerJS's default msgpack. Its serializer writes through a
+           Web Stream that never checks whether the channel is open, and WebKit
+           throws "Error sending binary data through RTCDataChannel" for a
+           send on a connecting channel — as an unhandled rejection, so it
+           arrived as an uncaught page error and took the session down. The
+           JSON serializer uses the guarded send path (buffered while
+           connecting, throws caught). These messages are a few dozen bytes,
+           so packing buys nothing. The answerer follows whatever we declare. */
         const dc = this.peer.connect(call.peer, { serialization: 'json', reliable: true });
         if (dc) {
           this._dataConns.set(call.peer, dc);

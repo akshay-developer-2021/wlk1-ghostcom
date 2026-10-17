@@ -80,6 +80,11 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends pulseaudio
           pulseaudio --start --exit-idle-time=-1 --disallow-exit
+          # A PulseAudio server with no SINK is still no audio device —
+          # Firefox reports a suspended context, which is the failure we are
+          # fixing. The null sink is the part that matters.
+          pactl load-module module-null-sink sink_name=wlk1_dummy || true
+          pactl list short sinks
       - run: npm run build
       - run: npm run test:e2e:${{ matrix.browser }}
       # The app's mesh log is the only evidence a Firefox failure has:
@@ -118,6 +123,11 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends pulseaudio
           pulseaudio --start --exit-idle-time=-1 --disallow-exit
+          # A PulseAudio server with no SINK is still no audio device —
+          # Firefox reports a suspended context, which is the failure we are
+          # fixing. The null sink is the part that matters.
+          pactl load-module module-null-sink sink_name=wlk1_dummy || true
+          pactl list short sinks
       - run: npm run build
       - name: cross-engine session ${{ matrix.pair }}
         run: npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium --workers=1
@@ -183,6 +193,11 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends pulseaudio
           pulseaudio --start --exit-idle-time=-1 --disallow-exit
+          # A PulseAudio server with no SINK is still no audio device —
+          # Firefox reports a suspended context, which is the failure we are
+          # fixing. The null sink is the part that matters.
+          pactl load-module module-null-sink sink_name=wlk1_dummy || true
+          pactl list short sinks
       - run: npm run build
       - name: three-engine session
         run: npm run test:e2e:triple
