@@ -52,8 +52,11 @@ export interface E2eePort {
 }
 
 export interface E2eeInstance {
-  secureSender(sender: RTCRtpSender): Promise<void>;
-  secureReceiver(receiver: RTCRtpReceiver): Promise<void>;
+  /** Both resolve true only when frames are genuinely transformed. The mesh
+      advertises that answer to the peer, so an engine that cannot attach must
+      never be announced as E2E. */
+  secureSender(sender: RTCRtpSender): Promise<boolean>;
+  secureReceiver(receiver: RTCRtpReceiver): Promise<boolean>;
   destroy(): void;
 }
 

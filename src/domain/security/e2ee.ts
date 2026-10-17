@@ -161,9 +161,16 @@ export class E2EE {
       authenticate — the frames the swap emitted outside the new pump.
       Each assignment also abandons the previous pump inside the worker, so
       a per-press re-arm piled up dead loops for the life of the session. */
-  async secureSender(sender: RTCRtpSender): Promise<void> {
+  /** Resolves TRUE only when frames from this sender will actually be
+      encrypted. The caller advertises that answer to the peer, and the two
+      error directions are not symmetric: over-claiming means the peer keeps
+      its decryptor armed, discards every frame we send in the clear, and the
+      conversation is silent behind a green badge. Under-claiming only costs a
+      needless SRTP fallback. */
+  async secureSender(sender: RTCRtpSender): Promise<boolean> {
     const marked = sender as MarkedSender;
-    if (!this.enabled || !sender || marked.__wlkSecured) return;
+    if (marked?.__wlkSecured) return true;
+    if (!this.enabled || !sender) return false;
     await this._ready;
     try {
       const ST = scriptTransformCtor();
@@ -176,15 +183,18 @@ export class E2EE {
       }
     } catch (err) {
       this._log(`E2EE SENDER ATTACH FAILED — ${(err as Error)?.message ?? err}`, 'warn');
-      throw err; // the mesh keeps the leg on SRTP and says so
+      return false; // the mesh keeps the leg on SRTP and says so
     }
     marked.__wlkSecured = true;
+    return true;
   }
 
-  /** Wire decryption into an inbound receiver. */
-  async secureReceiver(receiver: RTCRtpReceiver): Promise<void> {
+  /** Wire decryption into an inbound receiver. Resolves true when the frames
+      are genuinely decryptable, for the same reason as secureSender. */
+  async secureReceiver(receiver: RTCRtpReceiver): Promise<boolean> {
     const marked = receiver as MarkedReceiver;
-    if (!this.enabled || !receiver || marked.__wlkDec) return;
+    if (marked?.__wlkDec) return true;
+    if (!this.enabled || !receiver) return false;
     await this._ready;
     try {
       const ST = scriptTransformCtor();
@@ -197,9 +207,10 @@ export class E2EE {
       }
     } catch (err) {
       this._log(`E2EE RECEIVER ATTACH FAILED — ${(err as Error)?.message ?? err}`, 'warn');
-      throw err; // flags stay unset so callers can log + retry
+      return false; // flags stay unset so callers can log + retry
     }
     marked.__wlkDec = true;
+    return true;
   }
 
   /** Summed across both direction-workers — a drop is a drop either way. */

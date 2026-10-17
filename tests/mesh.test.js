@@ -983,10 +983,16 @@ describe('DataChannel ownership (single dialer per leg pair)', () => {
 });
 
 describe('E2EE transform timing (armed at leg creation)', () => {
-  const e2eeMock = () => ({ secureSender: vi.fn().mockResolvedValue(), secureReceiver: vi.fn().mockResolvedValue() });
+  /* secureSender/secureReceiver resolve TRUE when frames are genuinely
+     transformed — the mesh advertises that answer to the peer. */
+  const e2eeMock = () => ({
+    secureSender: vi.fn().mockResolvedValue(true),
+    secureReceiver: vi.fn().mockResolvedValue(true),
+  });
+  const flush = () => new Promise((r) => setTimeout(r, 0));
   const openConn = (peerId) => ({ peer: peerId, open: true, on: () => {}, send: () => {}, close: () => {} });
 
-  it('wires the outbound transform when the leg is registered, not after the handshake', () => {
+  it('wires the outbound transform when the leg is registered, not after the handshake', async () => {
     const e2ee = e2eeMock();
     const { mesh } = makeMesh(e2ee);
     const sender = fakeSender();
@@ -996,7 +1002,36 @@ describe('E2EE transform timing (armed at leg creation)', () => {
          sending (measured: onrtctransform never fires), so the attach must
          not wait for the capability handshake. */
       expect(e2ee.secureSender).toHaveBeenCalledWith(sender);
+      await flush();                       // the flag follows the attach result
       expect(mesh.legs.get('peer-0')._cryptoArmed).toBe(true);
+    } finally {
+      mesh.leave();
+    }
+  });
+
+  /* The advertisement is the whole point: a peer that cannot attach must say
+     so, or the other end keeps its decryptor armed and discards every frame
+     we send in the clear (measured: dec=0 with decDrops on every frame). */
+  it('advertises plaintext when the transform cannot be attached', async () => {
+    const e2ee = { secureSender: vi.fn().mockResolvedValue(false), secureReceiver: vi.fn().mockResolvedValue(true) };
+    const { mesh } = makeMesh(e2ee);
+    const sent = [];
+    const handlers = {};
+    const conn = {
+      peer: 'peer-0', open: false,
+      on: (ev, fn) => { handlers[ev] = fn; },
+      fire: (ev, d) => handlers[ev]?.(d),
+      send: (m) => sent.push(m),
+      close: () => {},
+    };
+    try {
+      mesh._registerLeg(fakeCall('peer-0', fakeSender()), 0, 'listen');
+      await flush();
+      const leg = mesh.legs.get('peer-0');
+      expect(leg._cryptoArmed).toBe(false);
+      mesh._wireCryptoConn(conn, leg);
+      conn.fire('open');
+      expect(JSON.parse(sent[0]).e2ee).toBe(false);
     } finally {
       mesh.leave();
     }
@@ -1018,12 +1053,13 @@ describe('E2EE transform timing (armed at leg creation)', () => {
     }
   });
 
-  it('a peer that answers without E2EE gets the leg rebuilt untransformed', () => {
+  it('a peer that answers without E2EE gets the leg rebuilt untransformed', async () => {
     const e2ee = e2eeMock();
     const { mesh } = makeMesh(e2ee);
     try {
       mesh._registerLeg(fakeCall('peer-1', fakeSender()), 0, 'listen');
       expect(e2ee.secureSender).toHaveBeenCalledTimes(1);
+      await flush();                       // armed, so the rebuild path applies
 
       mesh._settleCrypto(mesh.legs.get('peer-1'), false, 'peer lacks transforms');
       expect(mesh.legs.has('peer-1')).toBe(false);      // an encrypted leg it cannot read is useless

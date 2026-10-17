@@ -802,7 +802,7 @@ export class Mesh {
     conn.on('open', () => {
       leg._wireOpen = true;
       clearTimeout(leg._wireTimer);
-      this._wireSend(conn, { t: 'wlk1-hello', e2ee: !!this.e2ee });
+      this._wireSend(conn, { t: 'wlk1-hello', e2ee: leg._cryptoArmed === true });
       this.log(`CHANNEL OPEN — UNIT-${leg.slot}`, 'sys');
     });
     conn.on('data', (d: unknown) => {
@@ -833,7 +833,7 @@ export class Mesh {
         return;
       }
       if (m.t !== 'wlk1-hello' && m.t !== 'wlk1-ack') return;
-      if (m.t === 'wlk1-hello') this._wireSend(conn, { t: 'wlk1-ack', e2ee: !!this.e2ee });
+      if (m.t === 'wlk1-hello') this._wireSend(conn, { t: 'wlk1-ack', e2ee: leg._cryptoArmed === true });
       clearTimeout(leg._cryptoTimer);
       this._settleCrypto(leg, !!m.e2ee, m.e2ee ? '' : 'peer lacks transforms');
     });
@@ -1055,8 +1055,17 @@ export class Mesh {
     if (!pc) return;
     const sender = this._senderFor(pc);
     if (sender) {
-      leg._cryptoArmed = true;
-      e2ee.secureSender(sender).catch((err: unknown) => {
+      /* The flag means "frames leaving this leg are encrypted", set from the
+         attach result — not from the mere existence of a sender. The wire
+         handshake advertises this flag, so an engine that cannot attach must
+         not be announced as E2E: the peer would keep its decryptor armed and
+         throw away every cleartext frame. */
+      e2ee.secureSender(sender).then((armed) => {
+        if (!armed) leg._cryptoArmed = false;
+        else if (this._current(leg)) leg._cryptoArmed = true;
+        this._emitCrypto();
+      }).catch((err: unknown) => {
+        leg._cryptoArmed = false;
         this.log(`UNIT-${leg.slot} — E2EE SENDER ATTACH FAILED — ${(err as Error)?.message ?? err}`, 'warn');
       });
     }
