@@ -5,6 +5,7 @@ import { applyBrokerConfig } from './utils/room';
 import { joinRoom, joinRoomAll } from './utils/room';
 import { toneRoundTrip, leaveToJoin, assertEncryptedWire } from './utils/mesh-helpers';
 import { assertPeerCount, assertPeerChips, assertScreenVisible, assertSyncBar } from './utils/assertions';
+import { LogCollector } from './fixtures/log-collector';
 
 /**
  * 1:1 batch simulator.
@@ -28,7 +29,10 @@ const LAUNCH_ARGS = [
   '--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessRespectPreflightResults',
 ];
 
-async function launchUser(label: string, browserName = 'chromium'): Promise<{ browser: Browser; page: Page }> {
+async function launchUser(
+  label: string,
+  browserName = 'chromium',
+): Promise<{ browser: Browser; page: Page; logs: LogCollector; label: string }> {
   const type = browserName === 'firefox' ? firefox : browserName === 'webkit' ? webkit : chromium;
   /* args must be explicit: inside a worker a manual launch() inherits the
      running project's launchOptions, so webkit/firefox silently got Chrome's
@@ -50,7 +54,25 @@ async function launchUser(label: string, browserName = 'chromium'): Promise<{ br
   const page = await context.newPage();
   await applyBrokerConfig(page);
   page.on('pageerror', (err) => { throw new Error(`[${label}] uncaught page error: ${err.message}`); });
-  return { browser, page };
+  /* These specs launch their own browsers, so the `logs` fixture never runs
+     and nothing collects page output — which is why the CI app-log step had
+     nothing to print for the firefox and cross-engine lanes. Collect here so
+     one JSONL per user lands in test-results/logs on every run, pass or fail. */
+  const logs = new LogCollector();
+  logs.attach(page, label.includes('bob') ? 'bob' : 'alice');
+  return { browser, page, logs, label };
+}
+
+type User = Awaited<ReturnType<typeof launchUser>>;
+
+/** Flush each user's captured output under its OWN name — two users sharing
+    a filename means one side's evidence silently overwrites the other's, and
+    in a cross-engine session the interesting half is usually the other one.
+    Write failures must not mask the real test failure. */
+async function flushLogs(users: User[], title: string): Promise<void> {
+  await Promise.allSettled(
+    users.map((u) => u.logs.writeLogFile({ title: `${title}-${u.label}` })),
+  );
 }
 
 test.describe.configure({ retries: 0, timeout: 600_000 });
@@ -87,6 +109,7 @@ test(`1x1 batch: ${BATCH_SIZE} independent two-user sessions against ${BASE_URL}
       results.push(`session ${i}: OK (${secs}s)`);
       console.log(`[batch] session ${i}/${BATCH_SIZE} OK in ${secs}s`);
     } finally {
+      await flushLogs([alice, bob], `batch${i}-${browserName}`);
       await Promise.allSettled([alice.browser.close(), bob.browser.close()]);
     }
   }
@@ -153,6 +176,7 @@ for (const pair of CROSS_PAIRS) {
       await assertPeerCount(bob.page, 0);
       await assertSyncBar(bob.page, 'ON CHANNEL — NO OTHER UNITS');
     } finally {
+      await flushLogs([alice, bob], `pair-${left}-${right}`);
       await Promise.allSettled([alice.browser.close(), bob.browser.close()]);
     }
   });
@@ -179,12 +203,10 @@ const TRIPLE = (process.env['E2E_CROSS_TRIPLE'] ?? '')
 
 if (TRIPLE.length >= 3) {
   test(`cross-engine triple: ${TRIPLE.join(' + ')}`, async () => {
-    const crew: { engine: string; browser: Browser; page: Page }[] = [];
+    const users: (User & { engine: string })[] = [];
     for (const [i, engine] of TRIPLE.entries()) {
-      const u = await launchUser(`${engine}-${i}`, engine);
-      crew.push({ engine, ...u });
+      users.push({ engine, ...(await launchUser(`${engine}-${i}`, engine)) });
     }
-    const users = crew;
     try {
       await joinRoomAll(users.map((u) => u.page));
 
@@ -221,6 +243,7 @@ if (TRIPLE.length >= 3) {
         await assertPeerChips(u.page, 1);
       }
     } finally {
+      await flushLogs(users, `triple-${TRIPLE.join('-')}`);
       await Promise.allSettled(users.map((u) => u.browser.close()));
     }
   });
