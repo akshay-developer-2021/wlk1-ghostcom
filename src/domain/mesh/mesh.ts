@@ -27,7 +27,7 @@ import type { LogKind } from '../../infra/dom/dom.js';
 /** Every wire message: a small JSON object sent as TEXT. */
 interface WireMsg { t: string; e2ee?: boolean; speaking?: boolean }
 
-export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mode: 'live'|'listen'; crypto: boolean|null; dcOwner?: boolean; recvonly?: boolean; _cryptoArmed?: boolean; _cryptoTimer?: any; _neverTimer?: any; _wireTimer?: any; _wireOpen?: boolean; _sasDone?: boolean; _sasListeners?: { ice: (() => void) | null; conn: (() => void) | null } }
+export interface Leg { call: any /* PeerJS MediaConnection */; slot: number; mode: 'live'|'listen'; crypto: boolean|null; dcOwner?: boolean; recvonly?: boolean; _cryptoArmed?: boolean; _peerPlain?: boolean; _cryptoTimer?: any; _neverTimer?: any; _wireTimer?: any; _wireOpen?: boolean; _sasDone?: boolean; _sasListeners?: { ice: (() => void) | null; conn: (() => void) | null } }
 
 export interface TxReport { attached: number; redialed: number }
 
@@ -835,6 +835,10 @@ export class Mesh {
       if (m.t !== 'wlk1-hello' && m.t !== 'wlk1-ack') return;
       if (m.t === 'wlk1-hello') this._wireSend(conn, { t: 'wlk1-ack', e2ee: leg._cryptoArmed === true });
       clearTimeout(leg._cryptoTimer);
+      /* The peer's own answer to "are your frames encrypted?" — that, not its
+         engine, is what decides whether our decryptor may be armed and
+         whether its cleartext audio is safe to play. */
+      leg._peerPlain = !m.e2ee;
       this._settleCrypto(leg, !!m.e2ee, m.e2ee ? '' : 'peer lacks transforms');
     });
     conn.on('close', () => {
@@ -1005,6 +1009,8 @@ export class Mesh {
     this._emitCrypto();
   }
 
+  /** Retry path for the outbound transform when the sender did not exist at
+      leg registration (glare/renegotiation). */
   private _armE2ee(pc: RTCPeerConnection, e2ee: E2EE): Promise<void> {
     const run = async (): Promise<void> => {
       const s = this._senderFor(pc);
@@ -1029,24 +1035,6 @@ export class Mesh {
    * Here the leg has just been created and no frame can have left yet: media
    * only flows once ICE and DTLS complete, long after this line.
    */
-  /** Add the answerer's audio transceiver and arm its transform before the
-      answer is applied. Returns false when the engine cannot do it, and the
-      caller then falls back to PeerJS's own addTrack+answer. */
-  private _armAnswerSender(call: any, track: MediaStreamTrack): boolean {
-    const e2ee = this.e2ee;
-    if (!e2ee || this._plainPeers.has(call.peer as string)) return false;
-    const pc = call.peerConnection as RTCPeerConnection | null | undefined;
-    if (!pc || typeof pc.addTransceiver !== 'function') return false;
-    try {
-      const sender = pc.addTransceiver(track, { direction: 'sendrecv' }).sender;
-      if (!('transform' in sender)) return false;
-      e2ee.secureSender(sender).catch(() => { /* the handshake path retries + logs */ });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   private _armSenderCrypto(leg: Leg): void {
     const e2ee = this.e2ee;
     const id = leg.call.peer as string;
@@ -1069,10 +1057,13 @@ export class Mesh {
         this.log(`UNIT-${leg.slot} — E2EE SENDER ATTACH FAILED — ${(err as Error)?.message ?? err}`, 'warn');
       });
     }
-    /* Receivers: the answerer already has one — PeerJS applies the remote
-       description inside answer(), so its 'track' event fired before this
-       leg was registered. The dialer gets its track later, with the answer.
-       Both must be armed before the first frame, for the same reason. */
+    /* Receivers, in the same window and for the same reason as the sender:
+       the answerer already has one — PeerJS applies the remote description
+       inside answer(), so its 'track' event fired before this leg was
+       registered — and the dialer gets its track with the answer. An attach
+       made after frames have arrived is silently ignored by the engines:
+       measured today, arming the decryptor only once the handshake settled
+       left dec=0 while 1532 frames crossed the leg. */
     for (const r of pc.getReceivers()) {
       e2ee.secureReceiver(r).catch(() => { /* the handshake path retries + logs */ });
     }
@@ -1082,14 +1073,36 @@ export class Mesh {
     });
   }
 
+  /** Add the answerer's audio transceiver and arm its transform before the
+      answer is applied. Returns false when the engine cannot do it, and the
+      caller then falls back to PeerJS's own addTrack+answer. */
+  private _armAnswerSender(call: any, track: MediaStreamTrack): boolean {
+    const e2ee = this.e2ee;
+    if (!e2ee || this._plainPeers.has(call.peer as string)) return false;
+    const pc = call.peerConnection as RTCPeerConnection | null | undefined;
+    if (!pc || typeof pc.addTransceiver !== 'function') return false;
+    try {
+      const sender = pc.addTransceiver(track, { direction: 'sendrecv' }).sender;
+      if (!('transform' in sender)) return false;
+      e2ee.secureSender(sender).catch(() => { /* the handshake path retries + logs */ });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   _emitCrypto(): void {
     const legs = [...this.legs.values()];
     /* Publish each leg's settlement to the UI. remote-audio gates playback
-       on this: an un-settled (null) or plain-SRTP (false) leg must not
-       reach the speakers — its frames are either raw AES-GCM or cleartext. */
+       on this: an un-settled (null) leg must not reach the speakers — its
+       frames may be raw AES-GCM. A settled plain leg (false + the peer said
+       its frames are not transformed) is ordinary SRTP audio and IS
+       playable; muting it silenced every mixed-engine room. */
     for (const leg of legs) {
-      if (state.peers.get(leg.slot) && state.peers.get(leg.slot)?.crypto !== leg.crypto) {
-        setPeer(leg.slot, { crypto: leg.crypto });
+      const p = state.peers.get(leg.slot);
+      const plain = leg._peerPlain === true;
+      if (p && (p.crypto !== leg.crypto || (p.plain === true) !== plain)) {
+        setPeer(leg.slot, { crypto: leg.crypto, plain });
       }
     }
     let status: string;

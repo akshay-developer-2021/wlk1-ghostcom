@@ -46,10 +46,18 @@ export function initRemoteAudio({ sfx, loop, getVolume }: RemoteAudioDeps): Remo
   const sinks = new Map<number, HTMLAudioElement>();
   const sinkTaps = new Map<number, { an: AnalyserNode; src: AudioNode }>();
   /** Slots whose frames must never reach the speakers: crypto is still
-      null (handshake un-settled → raw AES-GCM) or false (plain SRTP). */
+      null (handshake un-settled → frames may be raw AES-GCM) or the leg is
+      SRTP with an unproven peer. A leg whose peer TOLD us it is not
+      transforming (`plain`) carries ordinary decodable audio and plays. */
   const cryptoBlocked = new Set<number>();
   let sharedGain: GainNode | null = null;
   let unmuteHinted = false;
+
+  /** Is this leg's inbound audio decodable — E2EE with our decryptor
+      attached, or a peer that proved it sends cleartext? Anything else
+      (handshake pending, peer silent, attach unknown) stays muted: raw
+      AES-GCM through the Opus decoder is broadband screech. */
+  const playable = (p: PeerInfo): boolean => p.crypto === true || p.plain === true;
 
   /** One shared gain node for every remote stream — src → gain → speakers. */
   function remoteGain(): GainNode | null {
@@ -76,11 +84,11 @@ export function initRemoteAudio({ sfx, loop, getVolume }: RemoteAudioDeps): Remo
       }
     }
     if (!routed) {
-      /* NEVER play a leg whose decrypt transform is not attached: the
-         inbound frames are raw AES-GCM (crypto null) or cleartext (false)
-         and the Opus decoder turns them into broadband screech. This gate
-         is authoritative — routeSink and replayAudio both write `muted`,
-         so every writer must go through here. */
+      /* NEVER play a leg whose inbound frames are not known-decodable: the
+         transform may not be attached yet (crypto null) and the Opus
+         decoder turns raw AES-GCM into broadband screech. This gate is
+         authoritative — routeSink and replayAudio both write `muted`, so
+         every writer must go through here. */
       el.muted = cryptoBlocked.has(slot);
       if (!el.muted) el.volume = clamp01(getVolume());
     }
@@ -114,7 +122,7 @@ export function initRemoteAudio({ sfx, loop, getVolume }: RemoteAudioDeps): Remo
         el.srcObject = stream;
         /* Keep the playback gate authoritative across every path that
            writes `muted` (this block, routeSink, replayAudio). */
-        if (p.crypto === true) cryptoBlocked.delete(slot); else cryptoBlocked.add(slot);
+        if (playable(p)) cryptoBlocked.delete(slot); else cryptoBlocked.add(slot);
         el.play().catch(() => {
           /* say it once — a locked context would otherwise re-toast on every
              reconnect and bury the screen in identical warnings */
@@ -126,21 +134,21 @@ export function initRemoteAudio({ sfx, loop, getVolume }: RemoteAudioDeps): Remo
            Raw AES-GCM is broadband noise, so a tap on an un-decrypted leg
            reads as permanent "someone is speaking" — the VU bars, the RX
            LED and the status banner all lie. Gate the tap with playback:
-           no tap until crypto settles true, and drop it again if the leg
+           no tap until the leg is playable, and drop it again if the leg
            is re-negotiated back to unsettled. */
         const tap = analyserFor(stream);
         if (tap) sinkTaps.set(slot, tap);          // remembered even while blocked
-        if (tap && p.crypto === true) {
+        if (tap && playable(p)) {
           loop.registerRemote(slot, tap.an, tap.src);
         } else if (tap) {
           /* keep the node but disconnect it from the graph */
           try { tap.src.disconnect(); } catch { /* noop */ }
         }
         routeSink(slot, el);
-      } else if (p.crypto === true ? cryptoBlocked.delete(slot) : cryptoBlocked.add(slot)) {
+      } else if (playable(p) ? cryptoBlocked.delete(slot) : cryptoBlocked.add(slot)) {
         /* crypto settled after the stream landed — (un)mute, and attach or
            drop the tap so the VU/RX path matches what is actually audible */
-        if (p.crypto === true) {
+        if (playable(p)) {
           const tap = sinkTaps.get(slot);
           if (tap) loop.registerRemote(slot, tap.an, tap.src);
         } else {

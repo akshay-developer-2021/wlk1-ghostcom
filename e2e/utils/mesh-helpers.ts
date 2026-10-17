@@ -326,6 +326,131 @@ export async function assertEncryptedWire(page: Page, who: string): Promise<{ en
   return { enc: s.enc.n, dec: s.dec.n };
 }
 
+/** Does this page have an E2EE engine at all? (window.mesh.e2ee is null on
+    engines without Encoded Transforms — Linux WebKit ships none.) */
+async function hasEngine(page: Page): Promise<boolean> {
+  return page.evaluate(() => !!(window as unknown as { mesh?: { e2ee?: unknown } }).mesh?.e2ee);
+}
+
+type WireCounts = { enc: { drops: number; n: number }; dec: { drops: number; n: number } };
+const wireCounts = (s: WireCounts): string =>
+  ` [enc=${s.enc.n} dec=${s.dec.n} encDrops=${s.enc.drops} decDrops=${s.dec.drops}]`;
+
+/** Poll for a wire condition, failing with every counter so the reason is in
+    the message instead of "expected 0 to be greater than 0". */
+async function waitForWire(
+  page: Page,
+  who: string,
+  ok: (s: WireCounts) => boolean,
+  what: string,
+): Promise<WireCounts> {
+  const deadline = Date.now() + 30_000;
+  let stats = await wireStats(page);
+  while (Date.now() < deadline && !(stats && ok(stats))) {
+    await page.waitForTimeout(250);
+    stats = await wireStats(page);
+  }
+  expect(stats, `${who}: no E2EE worker`).not.toBeNull();
+  expect(stats && ok(stats), `${who}: ${what}${stats ? wireCounts(stats) : ''}`).toBe(true);
+  return stats!;
+}
+
+/** The leg must have stopped changing: two samples 750ms apart agree. Used
+    where "the transforms ran" is the wrong claim — a peer with no transforms
+    can never produce encrypted frames, so what has to be observable is that
+    the leg was rebuilt plaintext and nothing is discarded any more. */
+async function assertWireStops(
+  page: Page,
+  who: string,
+  frozen: (prev: WireCounts, cur: WireCounts) => boolean,
+  what: string,
+): Promise<WireCounts> {
+  const deadline = Date.now() + 30_000;
+  let prev = await wireStats(page);
+  for (;;) {
+    const cur = await wireStats(page);
+    expect(cur, `${who}: no E2EE worker`).not.toBeNull();
+    if (prev && frozen(prev, cur!)) return cur!;
+    expect(Date.now(), `${who}: ${what}${cur ? wireCounts(cur) : ''}`).toBeLessThan(deadline);
+    prev = cur;
+    await page.waitForTimeout(750);
+  }
+}
+
+/**
+ * Capable page whose ONLY peers have no transforms: the honest SRTP outcome.
+ *   · nothing was ever decrypted (dec=0) — the peer cannot encrypt;
+ *   · the frames the first leg discarded while still optimistically armed are
+ *     inherent (an attach made after frames arrive is ignored, so the
+ *     transform attaches before the peer can identify itself); what must
+ *     never happen again is drops that keep climbing;
+ *   · the outbound transform stopped with the plaintext rebuild (enc frozen).
+ */
+async function assertSrtpFallback(page: Page, who: string): Promise<{ enc: number; dec: number }> {
+  await waitForWire(page, who, (s) => s.dec.n === 0,
+    'decryptor processed frames from a peer that has no transforms — a cleartext leg is being decrypted');
+  const s = await assertWireStops(
+    page, who,
+    (p, c) => p.enc.n === c.enc.n && p.dec.drops === c.dec.drops,
+    'still transforming or discarding frames 30s after linking to a peer without transforms — the leg was not rebuilt plaintext',
+  );
+  expect(s.dec.n, `${who}: decryptor processed frames from a peer without transforms${wireCounts(s)}`).toBe(0);
+  return { enc: s.enc.n, dec: s.dec.n };
+}
+
+/**
+ * Capable page in a MIXED room: at least one peer transforms (that leg must
+ * run end to end) and at least one cannot (that leg is rebuilt plaintext, so
+ * its early cleartext drops must stop, not climb). The strict drops===0
+ * assertion cannot hold here — the transform is attached before either peer
+ * can identify itself, which is an engine constraint, not a defect.
+ */
+async function assertMixedWire(page: Page, who: string): Promise<{ enc: number; dec: number }> {
+  await waitForWire(page, who, (s) => s.enc.n > 0 && s.dec.n > 0,
+    'no E2EE leg is transforming frames in a room that has a transform-capable peer');
+  const s = await assertWireStops(
+    page, who,
+    (p, c) => p.dec.drops === c.dec.drops,
+    'still discarding frames from the transform-less peer 30s after linking — that leg was not rebuilt plaintext',
+  );
+  return { enc: s.enc.n, dec: s.dec.n };
+}
+
+/**
+ * The wire must carry what the ENGINES in the room can carry.
+ *
+ * Every page that has transforms AND a peer that has them too gets the full
+ * strict assertion (decDrops===0 included). A capable page whose only peers
+ * are transform-less engines gets the honest SRTP fallback checks. A page
+ * with a foot in both rooms gets both claims, each on the leg that can keep
+ * it. A page with no engine is skipped — no worker exists, so there is
+ * nothing to count and nothing to claim.
+ *
+ * Which engines these are is decided from the page at runtime, never from a
+ * lane name: macOS WebKit has the API, Linux WebKit does not.
+ */
+export async function assertWireHonest(
+  units: { page: Page; who: string }[],
+): Promise<{ who: string; engine: boolean; enc: number | null; dec: number | null }[]> {
+  const engines = await Promise.all(units.map((u) => hasEngine(u.page)));
+  const out: { who: string; engine: boolean; enc: number | null; dec: number | null }[] = [];
+  for (const [i, u] of units.entries()) {
+    if (!engines[i]) {
+      out.push({ who: u.who, engine: false, enc: null, dec: null });
+      continue;
+    }
+    const capablePeer = engines.some((e, j) => e && j !== i);
+    const plainPeer = engines.some((e, j) => !e && j !== i);
+    const s = capablePeer && !plainPeer
+      ? await assertEncryptedWire(u.page, u.who)
+      : capablePeer
+        ? await assertMixedWire(u.page, u.who)
+        : await assertSrtpFallback(u.page, u.who);
+    out.push({ who: u.who, engine: true, enc: s.enc, dec: s.dec });
+  }
+  return out;
+}
+
 /**
  * Inject a tone on pageTx, transmit it through the mesh, record pageRx
  * DURING the transmission, then verify frequency/level/duration.

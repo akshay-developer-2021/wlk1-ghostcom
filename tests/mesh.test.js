@@ -1037,7 +1037,7 @@ describe('E2EE transform timing (armed at leg creation)', () => {
     }
   });
 
-  it('arms a receiver that already exists (the answerer gets it before answer() returns)', () => {
+  it('arms a receiver at registration — a late attach is ignored by the engines', () => {
     const e2ee = e2eeMock();
     const { mesh } = makeMesh(e2ee);
     const receiver = { track: { kind: 'audio' } };
@@ -1045,9 +1045,46 @@ describe('E2EE transform timing (armed at leg creation)', () => {
     call.peerConnection.getReceivers = () => [receiver];
     try {
       mesh._registerLeg(call, 0, 'listen', false);
+      /* Measured: arming the decryptor only once the handshake settled left
+         dec=0 while 1532 frames crossed the leg. Both directions attach
+         before media, because a transform attached after frames arrive does
+         nothing. */
       expect(e2ee.secureReceiver).toHaveBeenCalledWith(receiver);
+      mesh._settleCrypto(mesh.legs.get('peer-0'), true);   // peer: "encrypted"
       call.firePc('track', { receiver });               // dialer side: arrives later
       expect(e2ee.secureReceiver).toHaveBeenCalledTimes(2);
+    } finally {
+      mesh.leave();
+    }
+  });
+
+  /* The measured CI failure: a capable engine meets a peer that has no
+     transforms (Linux WebKit ships none). The first leg is armed before the
+     peer can identify itself — that is the engine constraint — but the leg
+     is rebuilt untransformed, and the rebuilt leg must never arm a decryptor
+     against cleartext frames. */
+  it('a peer without transforms never meets an armed decryptor on the rebuilt leg', async () => {
+    const e2ee = e2eeMock();
+    const { mesh } = makeMesh(e2ee);
+    const receiver = { track: { kind: 'audio' } };
+    const makeCall = () => {
+      const c = fakeCall('peer-9', fakeSender());
+      c.peerConnection.getReceivers = () => [receiver];
+      return c;
+    };
+    try {
+      mesh._registerLeg(makeCall(), 9, 'listen', false);
+      await flush();                       // outbound armed, as in the field
+      mesh._settleCrypto(mesh.legs.get('peer-9'), false, 'peer lacks transforms');
+      expect(mesh.legs.has('peer-9')).toBe(false);   // leg it cannot read is retired
+
+      const rebuilt = mesh._registerLeg(makeCall(), 9, 'listen', false);
+      await flush();
+      rebuilt.call.firePc('track', { receiver });    // media keeps flowing
+      /* Only the first leg ever armed; the rebuilt leg must not, or it would
+         discard every cleartext frame the peer sends. */
+      expect(e2ee.secureReceiver).toHaveBeenCalledTimes(1);
+      expect(rebuilt._cryptoArmed).toBeFalsy();      // still no transform to that peer
     } finally {
       mesh.leave();
     }

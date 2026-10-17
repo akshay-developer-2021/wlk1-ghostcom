@@ -3,7 +3,7 @@ import { BATCH_SIZE, BROKER_CONFIG, BASE_URL, TLS_BROKER, INJECT_BROKER } from '
 import { FAKE_MIC_SCRIPT, FIREFOX_USER_PREFS, needsFakeMicStub, grantMicPermissions } from './utils/media';
 import { applyBrokerConfig } from './utils/room';
 import { joinRoom, joinRoomAll } from './utils/room';
-import { toneRoundTrip, leaveToJoin, assertEncryptedWire } from './utils/mesh-helpers';
+import { toneRoundTrip, leaveToJoin, assertWireHonest } from './utils/mesh-helpers';
 import { assertPeerCount, assertPeerChips, assertScreenVisible, assertSyncBar } from './utils/assertions';
 import { LogCollector } from './fixtures/log-collector';
 
@@ -161,11 +161,16 @@ for (const pair of CROSS_PAIRS) {
       await assertPeerChips(bob.page, 1);
 
       /* Checked while the only thing on the wire is the silent carrier: both
-         ends must be transforming real frames, not shipping cleartext. WebKit
-         cannot decode its own recording, so this is also the only check the
-         WebKit-receives direction gets. */
-      console.log(`wire ${left}:`, JSON.stringify(await assertEncryptedWire(alice.page, left)));
-      console.log(`wire ${right}:`, JSON.stringify(await assertEncryptedWire(bob.page, right)));
+         ends must be transforming real frames where the engines can (WebKit
+         on Linux cannot — see assertWireHonest), and nothing may be
+         discarded on either side. WebKit cannot decode its own recording, so
+         this is also the only check the WebKit-receives direction gets. */
+      for (const r of await assertWireHonest([
+        { page: alice.page, who: left },
+        { page: bob.page, who: right },
+      ])) {
+        console.log(`wire ${r.who}:`, JSON.stringify(r));
+      }
 
       /* The tone is recorded on the RECEIVING side, and WebKit cannot decode
          its own MediaRecorder output — so a direction is measurable unless
@@ -221,9 +226,12 @@ if (TRIPLE.length >= 3) {
       for (const u of users) {
         await assertPeerCount(u.page, TRIPLE.length - 1);
         await assertPeerChips(u.page, TRIPLE.length - 1);
-        /* Per-page counters cover all six legs: outbound to two peers,
-           inbound from two. */
-        console.log(`wire ${u.engine}:`, JSON.stringify(await assertEncryptedWire(u.page, u.engine)));
+      }
+      /* Per-page counters cover all six legs: outbound to two peers, inbound
+         from two. Engines that cannot transform keep the honest SRTP
+         contract instead (assertWireHonest picks the claim per page). */
+      for (const r of await assertWireHonest(users.map((x) => ({ page: x.page, who: x.engine })))) {
+        console.log(`wire ${r.who}:`, JSON.stringify(r));
       }
 
       /* A real tone in every direction a recorder can measure. WebKit cannot

@@ -10,8 +10,15 @@
  *
  * This probe launches headless Firefox once per candidate configuration and
  * prints what the AudioContext does, so the next change is chosen from
- * evidence. Run: node e2e/probe-firefox-audio.mjs
+ * evidence. Candidate 5+ point the backend at a null PCM (ALSA_CONFIG_PATH)
+ * and at a forced ALSA cubeb backend — the two software-only devices a
+ * runner can offer without hardware. The workflow around this script also
+ * brings up a PulseAudio null sink and tries `snd-dummy`, then re-runs this
+ * same list so the log shows every option side by side.
+ *
+ * Run: node e2e/probe-firefox-audio.mjs
  */
+import { writeFileSync } from 'node:fs';
 import { firefox } from 'playwright';
 
 const AUTOPLAY = {
@@ -20,24 +27,48 @@ const AUTOPLAY = {
   'media.autoplay.blocking_policy': 0,
 };
 
+/* ALSA's equivalent of a "black hole" device: opens fine, consumes writes,
+   produces nothing. Honoured through the ALSA_CONFIG_PATH environment
+   variable, which alsa-lib reads instead of /etc/asound.conf. */
+const ALSA_NULL_CONF = '/tmp/wlk1-asound-null.conf';
+writeFileSync(ALSA_NULL_CONF, 'pcm.!default { type null }\nctl.!default { type null }\n');
+
 /** Each candidate: a name, prefs, and any change to the environment. */
 const CANDIDATES = [
   { name: 'stock firefox', prefs: {} },
   { name: 'autoplay prefs', prefs: AUTOPLAY },
   { name: 'autoplay + cubeb sandbox off', prefs: { ...AUTOPLAY, 'media.cubeb.sandbox': false } },
   { name: 'autoplay + fake stream pref', prefs: { ...AUTOPLAY, 'media.navigator.streams.fake': true } },
+  { name: 'autoplay + ALSA null default PCM', prefs: AUTOPLAY, env: { ALSA_CONFIG_PATH: ALSA_NULL_CONF } },
+  {
+    name: 'ALSA null PCM + cubeb forced to alsa',
+    prefs: { ...AUTOPLAY, 'media.cubeb.backend': 'alsa' },
+    env: { ALSA_CONFIG_PATH: ALSA_NULL_CONF },
+  },
+  {
+    name: 'ALSA null PCM + cubeb sandbox off',
+    prefs: { ...AUTOPLAY, 'media.cubeb.sandbox': false },
+    env: { ALSA_CONFIG_PATH: ALSA_NULL_CONF },
+  },
 ];
 
 /** Hard bound per candidate: a browser that never answers must not hold a
-    CI runner for half an hour. This exact hang is why the first version of
-    this probe sat in "in progress" for 28 minutes — Firefox refuses a
-    top-level data: URI navigation, so goto() never settled. */
+    CI runner. This exact hang is why an earlier version of this probe sat
+    in "in progress" for 28 minutes — Firefox refuses a top-level data: URI
+    navigation, so goto() never settled, and a bare Promise.race left the
+    browser process alive so node never exited. */
 const CANDIDATE_TIMEOUT_MS = 45_000;
 
-async function probe(prefs) {
-  const browser = await firefox.launch({ headless: true, firefoxUserPrefs: prefs });
+let current = null;   // the browser being probed, so a timeout can kill it
+
+async function probe(prefs, env) {
+  current = await firefox.launch({
+    headless: true,
+    firefoxUserPrefs: prefs,
+    ...(env ? { env: { ...process.env, ...env } } : {}),
+  });
   try {
-    const page = await browser.newPage();
+    const page = await current.newPage();
     await page.goto('about:blank');
     return await page.evaluate(async () => {
       const ctx = new AudioContext();
@@ -73,22 +104,34 @@ async function probe(prefs) {
       };
     });
   } finally {
-    await browser.close();
+    const b = current;
+    current = null;
+    await b.close().catch(() => {});
   }
 }
 
-async function bounded(prefs) {
-  return Promise.race([
-    probe(prefs),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`no answer in ${CANDIDATE_TIMEOUT_MS / 1000}s`)), CANDIDATE_TIMEOUT_MS).unref?.(),
-    ),
-  ]);
+async function bounded(c) {
+  let timer;
+  try {
+    return await Promise.race([
+      probe(c.prefs, c.env),
+      new Promise((_, reject) => {
+        timer = setTimeout(async () => {
+          /* Closing the browser makes the hung evaluate reject, so the
+             orphaned probe settles and node can exit. */
+          try { await current?.close(); } catch { /* already gone */ }
+          reject(new Error(`no answer in ${CANDIDATE_TIMEOUT_MS / 1000}s`));
+        }, CANDIDATE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 for (const c of CANDIDATES) {
   try {
-    const r = await bounded(c.prefs);
+    const r = await bounded(c);
     const works = r.after === 'running' && r.oscillatorPeak > 0;
     console.log(`${works ? 'WORKS ' : 'BROKEN'} ${c.name}: ${JSON.stringify(r)}`);
   } catch (err) {

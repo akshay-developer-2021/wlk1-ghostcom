@@ -134,9 +134,21 @@ describe('playback gate — never play un-decrypted frames', () => {
     expect(sinks()[0].muted).toBe(true);
   });
 
-  it('mutes a leg that negotiated plain SRTP', () => {
+  it('mutes a leg that negotiated plain SRTP with an unproven peer', () => {
     setPeer(5, { linked: true, stream: stream('s5'), crypto: false });
     expect(sinks()[0].muted).toBe(true);
+  });
+
+  /* Measured on the chromium<->webkit cross-engine lane: every mixed-engine
+     room was silent on BOTH sides, because a leg whose peer has no
+     transforms settles crypto=false and the gate muted it — even though the
+     frames are ordinary decodable SRTP audio. Only "the peer said its frames
+     are not transformed" makes it playable; crypto=false alone stays muted. */
+  it('plays and taps a leg whose peer proved it sends cleartext', () => {
+    const before = taps.registered.length;
+    setPeer(9, { linked: true, stream: stream('s9'), crypto: false, plain: true });
+    expect(sinks()[0].muted).toBe(false);
+    expect(taps.registered.length).toBe(before + 1);
   });
 
   it('unmutes once crypto settles true, attaching the tap exactly once', () => {

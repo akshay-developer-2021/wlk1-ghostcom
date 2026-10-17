@@ -2,6 +2,11 @@
 # "suspended" without an output device, so the app's silent carrier never
 # runs. Advisory and manually dispatched: it must never gate a build, and it
 # must not be cancelled by the push that is trying to use its answer.
+#
+# Each step adds ONE software device and re-runs the same candidate list, so
+# the log answers "which device makes ctx after === running AND
+# oscillatorPeak > 0" directly. Steps 2+ clean up after themselves so the
+# next step's result is attributable to its own device.
 name: firefox-audio-probe
 
 on:
@@ -10,7 +15,7 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,25 +24,31 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps firefox
-      - name: 1. bare runner
+      - name: 1. bare runner (no device, no audio daemon)
         run: |
-          echo "--- audio devices ---"
-          ls /dev/snd 2>&1 || echo "no /dev/snd"
-          pactl info 2>&1 | head -3 || true
+          echo "--- /dev/snd ---"; ls /dev/snd 2>&1 || echo "no /dev/snd"
+          echo "--- audio daemon ---"; pactl info 2>&1 | head -3 || echo "no pactl / no daemon"
           node e2e/probe-firefox-audio.mjs
       - name: 2. pulseaudio + null sink
         run: |
           sudo apt-get install -y pulseaudio
-          pulseaudio --start --exit-idle-time=-1 --disallow-exit
-          pactl load-module module-null-sink sink_name=wlk1_dummy || true
-          pactl list short sinks
+          export XDG_RUNTIME_DIR=/tmp/wlk1-pa
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          pulseaudio --start --exit-idle-time=-1 --disallow-exit 2>&1 | tail -5 || true
+          sleep 1
+          echo "--- daemon ---"; pgrep -a pulseaudio || echo "no pulseaudio process"
+          echo "--- info ---"; pactl info 2>&1 | head -8
+          echo "--- load null sink ---"; pactl load-module module-null-sink sink_name=wlk1_dummy 2>&1
+          echo "--- sinks ---"; pactl list short sinks 2>&1
+          pactl set-default-sink wlk1_dummy 2>&1 || true
           node e2e/probe-firefox-audio.mjs
-      - name: 3. alsa null device
+      - name: 3. snd-dummy kernel module (pulseaudio stopped first)
         run: |
-          printf 'pcm.!default { type null }\nctl.!default { type null }\n' > /tmp/asoundrc
-          node e2e/probe-firefox-audio.mjs
-      - name: 4. cubeb sandbox off + content sandbox off
-        env:
-          MOZ_DISABLE_CONTENT_SANDBOX: '1'
-        run: |
+          pkill pulseaudio 2>/dev/null || true
+          if ! sudo modprobe snd-dummy 2>&1; then
+            echo "--- modprobe failed; trying linux-modules-extra ---"
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)" 2>&1 | tail -3 || true
+            sudo modprobe snd-dummy 2>&1 || true
+          fi
+          echo "--- /dev/snd after ---"; ls /dev/snd 2>&1 || echo "still no /dev/snd"
           node e2e/probe-firefox-audio.mjs
