@@ -53,7 +53,13 @@ async function launchUser(
   if (needsFakeMicStub(browserName)) await context.addInitScript(FAKE_MIC_SCRIPT);
   const page = await context.newPage();
   await applyBrokerConfig(page);
-  page.on('pageerror', (err) => { throw new Error(`[${label}] uncaught page error: ${err.message}`); });
+  /* The stack, not just the message: a WebKit "Error sending binary data
+     through RTCDataChannel" looks identical whether it comes from our send or
+     from deep inside a dependency's write path, and those need different
+     fixes. */
+  page.on('pageerror', (err) => {
+    throw new Error(`[${label}] uncaught page error: ${err.message}\n${(err.stack ?? '').split('\n').slice(1, 6).join('\n')}`);
+  });
   /* These specs launch their own browsers, so the `logs` fixture never runs
      and nothing collects page output — which is why the CI app-log step had
      nothing to print for the firefox and cross-engine lanes. Collect here so

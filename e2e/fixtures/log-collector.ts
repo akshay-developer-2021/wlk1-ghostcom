@@ -47,7 +47,7 @@ export class LogCollector {
         browser: browserId,
         type: 'pageerror',
         level: 'warn',
-        text: err.message,
+        text: `${err.message}\n${(err.stack ?? '').split('\n').slice(1, 5).join('\n')}`,
       });
     });
   }

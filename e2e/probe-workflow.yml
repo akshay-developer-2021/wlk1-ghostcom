@@ -1,0 +1,43 @@
+# Why does Firefox never link on a runner? The AudioContext never leaves
+# "suspended" without an output device, so the app's silent carrier never
+# runs. Advisory and manually dispatched: it must never gate a build, and it
+# must not be cancelled by the push that is trying to use its answer.
+name: firefox-audio-probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps firefox
+      - name: 1. bare runner
+        run: |
+          echo "--- audio devices ---"
+          ls /dev/snd 2>&1 || echo "no /dev/snd"
+          pactl info 2>&1 | head -3 || true
+          node e2e/probe-firefox-audio.mjs
+      - name: 2. pulseaudio + null sink
+        run: |
+          sudo apt-get install -y pulseaudio
+          pulseaudio --start --exit-idle-time=-1 --disallow-exit
+          pactl load-module module-null-sink sink_name=wlk1_dummy || true
+          pactl list short sinks
+          node e2e/probe-firefox-audio.mjs
+      - name: 3. alsa null device
+        run: |
+          printf 'pcm.!default { type null }\nctl.!default { type null }\n' > /tmp/asoundrc
+          node e2e/probe-firefox-audio.mjs
+      - name: 4. cubeb sandbox off + content sandbox off
+        env:
+          MOZ_DISABLE_CONTENT_SANDBOX: '1'
+        run: |
+          node e2e/probe-firefox-audio.mjs
