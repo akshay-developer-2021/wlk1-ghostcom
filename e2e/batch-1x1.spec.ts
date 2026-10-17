@@ -30,7 +30,11 @@ const LAUNCH_ARGS = [
 
 async function launchUser(label: string, browserName = 'chromium'): Promise<{ browser: Browser; page: Page }> {
   const type = browserName === 'firefox' ? firefox : browserName === 'webkit' ? webkit : chromium;
-  const browser = await type.launch(browserName === 'chromium' ? { args: LAUNCH_ARGS } : {});
+  /* args must be explicit: inside a worker a manual launch() inherits the
+     running project's launchOptions, so webkit/firefox silently got Chrome's
+     flags. macOS ignores them, the Linux WebKit build dies on the first one
+     ("Cannot parse arguments: Unknown option --use-fake-device-for-media-stream"). */
+  const browser = await type.launch({ args: browserName === 'chromium' ? LAUNCH_ARGS : [] });
   /* An injected TLS broker is self-signed (test artifact) — the context
      must accept it or every wss handshake dies. */
   const context = await browser.newContext({ ignoreHTTPSErrors: TLS_BROKER && INJECT_BROKER });
