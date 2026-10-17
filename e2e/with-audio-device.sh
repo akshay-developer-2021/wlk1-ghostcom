@@ -28,21 +28,38 @@ if [ "${WLK1_AUDIO_DEVICE:-0}" = "1" ]; then
   # PulseAudio refuses to run.
   export XDG_RUNTIME_DIR=/tmp/wlk1-pa
   mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+  # Fragment size drives how often the server wakes: 10ms x 4 is a finer,
+  # more predictable callback cadence than the distro's 25ms default, without
+  # asking for a latency a timer-driven sink cannot deliver.
+  mkdir -p "$HOME/.config/pulse"
+  cat > "$HOME/.config/pulse/daemon.conf" <<'CONF'
+default-sample-rate = 48000
+default-fragment-size-msec = 10
+default-fragments = 4
+CONF
   pulseaudio --start --exit-idle-time=-1 --disallow-exit
   pgrep -x pulseaudio >/dev/null || { echo "PULSEAUDIO DID NOT START — the sink below cannot exist"; exit 1; }
-  # 48000, the rate real desktops use and the rate WebRTC encodes at. The
-  # default (44100) forces a conversion inside WebKitGTK on every outbound
-  # frame — the one stage where the wire was measured to carry uninitialized
-  # data instead of the source (see HANDOFF round 5).
-  pactl load-module module-null-sink sink_name=wlk1_dummy rate=48000
+  # A REAL device (kernel ALSA loopback: hardware-timed) beats the timer-paced
+  # null sink. The null sink is the one place WebKitGTK's outbound JS-audio
+  # was measured handing the encoder uninitialized data instead of the source
+  # (HANDOFF round 5). Fall back to the null sink when the module is missing.
+  sudo chmod -R a+rw /dev/snd 2>/dev/null || true
+  if sudo modprobe snd-aloop >/dev/null 2>&1 \
+     && pactl load-module module-alsa-sink sink_name=wlk1_dummy device=hw:Loopback,0,0 >/dev/null 2>&1; then
+    echo "AUDIO PATH: snd-aloop hw:Loopback,0,0 (hardware-timed)"
+  else
+    pactl load-module module-null-sink sink_name=wlk1_dummy rate=48000
+    echo "AUDIO PATH: null sink (timer) — snd-aloop unavailable"
+  fi
   pactl set-default-sink wlk1_dummy
   # What this attempt actually got: a flip that happens roughly half the time
   # must not be blamed on code before these are known to be constant.
   echo "── audio env ──"
   uname -r; nproc
   dpkg-query -W -f='${Package} ${Version}\n' pulseaudio 2>/dev/null || true
-  pactl info | head -3
-  pactl list sinks | grep -E "Name:|Sample Rate:" | head -6
+  pactl info | head -2
+  pactl list sinks > /tmp/wlk1-sinks.txt 2>/dev/null || true
+  head -22 /tmp/wlk1-sinks.txt
   pactl list short sinks | grep -q wlk1_dummy || { echo "NO NULL SINK — Firefox has no audio device"; exit 1; }
 fi
 
