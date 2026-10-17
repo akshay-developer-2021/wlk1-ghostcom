@@ -57,10 +57,6 @@ export async function injectTxTrack(page: Page, freq: number, durationMs: number
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
     source.connect(analyser);
-    /* Pulled by the graph like anything else: an unconnected tap may be
-       skipped by an engine and then reads a false silence. The sender page
-       hearing its own tone is harmless — CI renders into the null sink. */
-    analyser.connect(ctx.destination);
     source.start();
     const w = window as unknown as { __testTxTrack: MediaStreamTrack; __testTxRate: number; __testTxAnalyser?: AnalyserNode };
     w.__testTxTrack = dest.stream.getAudioTracks()[0]!;
