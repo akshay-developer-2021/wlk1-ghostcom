@@ -87,6 +87,20 @@ export class Mesh {
   private _dataConns = new Map<string, DataConnection>();      // peerId -> crypto-negotiation DataChannel
   private _ourDials = new WeakSet<DataConnection>();          // channels WE opened (vs received)
   private _plainPeers = new Set<string>();                    // peers whose hello carried no E2EE
+  /* The track PTT handed to beginTx: live from arm to endTx. While it is
+     set, every leg this mesh creates or answers must carry THAT audio.
+     A leg built mid-TX from mic.stream sends the wrong track when the two
+     differ (the tone harness caught exactly that — the fake capture device
+     reached the peer instead of the injected tone), and a device switch
+     under a live PTT hits the same path in production. */
+  private _txTrack: MediaStreamTrack | null = null;
+
+  private _txStream(): MediaStream | null {
+    /* readyState guard: a mic device swap ends the old track, and an ended
+       track must never be what a leg answers or dials with. */
+    if (!this._txTrack || this._txTrack.readyState === 'ended' || typeof MediaStream === 'undefined') return null;
+    return new MediaStream([this._txTrack]);
+  }
 
   constructor({ sfx = null, mic = null, e2ee = null, log = () => {}, config = CONFIG }: MeshOptions = {}) {
     this.sfx = sfx;
@@ -482,12 +496,16 @@ export class Mesh {
       /* Pre-gesture (or backgrounded) the shared audio context is locked.
          Never build or resume it here — that logs a console warning AND
          negotiates around a zero-frame source. Skip; the unlock handler
-         retries after the first tap, TX redial is the backstop. */
-      if (!silentContextRunning()) {
+         retries after the first tap, TX redial is the backstop.
+         A live TX needs neither: the track PTT handed beginTx already
+         exists, and a leg dialed mid-TX has to carry it — dialing the
+         silent carrier here makes the peer deaf for the whole TX. */
+      const txStream = this._txStream();
+      if (!txStream && !silentContextRunning()) {
         this.log(`UNIT-${slot} — AUDIO NOT READY (ctx ${silentContextState()}), RETRY ON TAP`, 'warn');
         return;
       }
-      const stream = silentStream();
+      const stream = txStream ?? silentStream();
       const tracks = typeof stream?.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
       if (!stream || tracks.length === 0) {
         // No sender available (AudioContext locked pre-gesture on Safari).
@@ -504,8 +522,8 @@ export class Mesh {
         return;
       }
       if (!call) { this.log(`DIAL UNIT-${slot} FAILED — NO CALL`, 'warn'); this._bumpDialFail(slot); return; }
-      this._registerLeg(call, slot, 'listen');
-      this.log(`LISTEN LEG → UNIT-${slot}`, 'rx');
+      this._registerLeg(call, slot, txStream ? 'live' : 'listen');
+      this.log(`${txStream ? 'TX LEG' : 'LISTEN LEG'} → UNIT-${slot}`, 'rx');
     }).catch(() => {});
   }
 
@@ -539,40 +557,50 @@ export class Mesh {
         try { call.close(); } catch { /* noop */ }
         return;
       }
-      /* Answer with the live mic ONLY while actually transmitting;
-         otherwise the silent track (muted-mic leak fix). If the silent
-         context is still locked (pre-gesture Safari), answer recvonly
-         rather than offering a trackless m-line that breaks negotiation. */
+      /* Answer with the PTT track while transmitting (the live mic when no
+         TX track is held), otherwise the silent track (muted-mic leak fix).
+         If the silent context is still locked (pre-gesture Safari), answer
+         recvonly rather than offering a trackless m-line that breaks
+         negotiation. */
       const mic = this.mic;
-      const liveMic: MediaStream | null = (state.tx && mic && mic.hot && mic.stream) || null;
+      /* The TX track wins over mic.stream: while PTT is live this mesh must
+         answer with the audio the user is producing, not with whatever the
+         mic module currently holds. They are only the same object when no
+         device swap happened under the live PTT. */
+      const txStream = this._txStream();
+      const liveMic: MediaStream | null = txStream ?? ((state.tx && mic && mic.hot && mic.stream) || null);
       /* Same gesture rule as dials: no ctx build/resume here (console
          warning + dead source). Locked context → recvonly answer; the
          TX-time redial upgrades the leg when the mic goes live. */
       const sil = liveMic ? null : (silentContextRunning() ? silentStream() : null);
       const silTracks = typeof sil?.getAudioTracks === 'function' ? sil.getAudioTracks() : [];
       const silTrack = silTracks[0] ?? null;
+      /* Tracks this side owns (the TX track, else the silent carrier) get the
+         arm-then-answer dance below; a stream we only borrowed (the real
+         mic) is PeerJS's own addTrack, unchanged. */
+      const ownStream = txStream ?? (liveMic ? null : (silTrack ? sil : null));
+      const ownTrack = ownStream && typeof ownStream.getAudioTracks === 'function'
+        ? (ownStream.getAudioTracks()[0] ?? null) : null;
       let recvonly = false;
       try {
-        if (liveMic) call.answer(liveMic);
-        else if (sil && silTrack) {
-          /* Own the answerer's audio transceiver, arm its transform, and only
-             then answer.
+        /* The arm-then-answer dance (ownTrack) needs a stream we own: the TX
+           track, or the silent carrier.
 
-             call.answer(stream) adds the track AND sets the local
-             description in one PeerJS step, which leaves no instant between
-             "sender exists" and "sender may start" — and the Linux WebKit
-             build silently ignores an encoded transform assigned after that
-             point. Measured on a chromium caller: WebKit's outbound
-             transform never ran, so every frame left in the clear while the
-             badge read E2E ARMED, and the caller's decryptor discarded each
-             one (enc=1 dec=0 decDrops=2). macOS WebKit tolerates the late
-             attach, which is why it never showed up there.
+           call.answer(stream) adds the track AND sets the local description in
+           one PeerJS step, which leaves no instant between "sender exists" and
+           "sender may start" — and the Linux WebKit build silently ignores an
+           encoded transform assigned after that point. Measured on a chromium
+           caller: WebKit's outbound transform never ran, so every frame left in
+           the clear while the badge read E2E ARMED, and the caller's decryptor
+           discarded each one (enc=1 dec=0 decDrops=2). macOS WebKit tolerates
+           the late attach, which is why it never showed up there.
 
-             Chromium callers do not need this: they create the sender
-             themselves before our code runs. */
-          if (this._armAnswerSender(call, silTrack)) call.answer();
-          else call.answer(sil);
-        } else { call.answer(); recvonly = true; }
+           Chromium callers do not need this: they create the sender
+           themselves before our code runs. */
+        if (liveMic && !txStream) call.answer(liveMic);
+        else if (ownTrack && this._armAnswerSender(call, ownTrack)) call.answer();
+        else if (ownStream) call.answer(ownStream);
+        else { call.answer(); recvonly = true; }
       } catch (err) {
         this.log(`ANSWER UNIT-${slot} FAILED — ${(err as Error)?.message ?? err}`, 'warn');
         try { call.close(); } catch { /* noop */ }
@@ -1223,6 +1251,7 @@ export class Mesh {
   /** Attach a live mic track to every leg. Returns delivery report. */
   async beginTx(track: MediaStreamTrack): Promise<TxReport> {
     const report: TxReport = { attached: 0, redialed: 0 };
+    this._txTrack = track ?? null;   // redials below must carry THIS audio, not mic.stream
     const stale = [...this.legs.entries()];
     const redialSlots: number[] = [];
     for (const [id, leg] of stale) {
@@ -1263,7 +1292,7 @@ export class Mesh {
         redialSlots.push(leg.slot);
       }
     }
-    const live = this.mic?.stream ?? null;
+    const live = this._txStream();   // the track PTT handed us above — never mic.stream
     if (redialSlots.length && live) {
       for (const rs of redialSlots) {
         if (this._destroyed) break;
@@ -1294,8 +1323,9 @@ export class Mesh {
   }
 
   endTx(): void {
-    /* legs keep SENDING — now the shared silent TRACK (DTX-idle), so
+    /* Legs keep SENDING — now the shared silent TRACK (DTX-idle), so
        the leg stays media-alive and hot-attach works on the next TX */
+    this._txTrack = null;   // before the drain: a post-TX redial carries silence
     const track = getSilentTrack();
     for (const [, leg] of this.legs) {
       leg.recvonly = false;

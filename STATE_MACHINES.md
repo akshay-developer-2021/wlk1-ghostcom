@@ -93,7 +93,11 @@ discarded. Codec-reconfiguration frames (zero-length, one per track swap,
 i.e. per PTT) carry no payload and pass through uncounted.
 
 A leg that cannot arm logs `E2EE UNAVAILABLE` and keeps working as
-SRTP; the badge reflects the weakest leg.
+SRTP; the badge reflects the weakest leg. A settled leg whose peer
+answered the handshake with `e2ee=false` carries ordinary decodable SRTP
+frames and **plays** — the playback gate only mutes an unsettled leg
+(`crypto === null`, frames may be raw AES-GCM). Muting every non-E2EE leg
+made mixed-engine rooms silent on both sides.
 
 **Guards:** `_joinMutex` (one join at a time), `_reconnectChain` (single
 broker reconnect), `_txGen` (stale async TX callbacks drop out), and

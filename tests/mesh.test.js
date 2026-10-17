@@ -25,8 +25,19 @@ vi.mock('../src/domain/audio/silentTrack.js', () => ({
   silentContextRunning: vi.fn(() => true),
 }));
 
+/* Node has no MediaStream, and the mesh builds one from the PTT track
+   whenever it must create a leg mid-TX. Without this stub those paths
+   silently fall back to no-stream in tests and pin the wrong behavior. */
+class FakeMediaStream {
+  constructor(tracks = []) { this._tracks = tracks; }
+  getAudioTracks() { return this._tracks; }
+  getTracks() { return this._tracks; }
+}
+globalThis.MediaStream ??= FakeMediaStream;
+
 import { Mesh, onCrypto } from '../src/domain/mesh/mesh.js';
 import { silentStream } from '../src/domain/audio/silentTrack.js';
+import { slotPeerId } from '../src/domain/crypto/crypto.js';
 import { set, state, clearPeers, linkedCount } from '../src/domain/state/state.js';
 
 function makeMesh(e2ee = null) {
@@ -58,6 +69,7 @@ function fakeCall(peerId, sender) {
     peerConnection: pc,
     handlers,
     pcHandlers,
+    answer: vi.fn(),
     close: vi.fn(),
     on(ev, cb) { (handlers[ev] ??= []).push(cb); },
     fire(ev, ...args) { for (const cb of handlers[ev] ?? []) cb(...args); },
@@ -178,7 +190,7 @@ afterEach(() => {
 });
 
 describe('beginTx — recvonly legs are redialed live', () => {
-  it('closes the bare leg and redials it with the live mic stream', async () => {
+  it('closes the bare leg and redials it with the track beginTx was handed', async () => {
     const prevSecret = state.secret;
     set({ secret: 'ABC234DEFGHJKLMN' });
     try {
@@ -187,21 +199,24 @@ describe('beginTx — recvonly legs are redialed live', () => {
       const leg = fakeLeg(1, sender);
       leg.recvonly = true;                       // answered bare pre-gesture
       mesh.legs.set('peer-1', leg);
-      const live = { id: 'live-mic-stream' };
+      const tone = { kind: 'audio', id: 'tone-track' };
       mesh.peer = {
         destroyed: false,
         call: vi.fn((id) => fakeCall(id, null)),
       };
-      mesh.mic = { stream: live };
+      mesh.mic = { stream: { id: 'live-mic-stream' } };
       mesh.channel = '22';
 
-      const report = await mesh.beginTx({ kind: 'audio' });
+      const report = await mesh.beginTx(tone);
 
       expect(leg.call.close).toHaveBeenCalledTimes(1);   // bare leg torn down
       expect(mesh.legs.has('peer-1')).toBe(false);
       expect(report).toEqual({ attached: 0, redialed: 1 });
       expect(mesh.peer.call).toHaveBeenCalledTimes(1);
-      expect(mesh.peer.call.mock.calls[0][1]).toBe(live); // redial carries mic
+      /* The redial carries the TX audio, NOT mic.stream: the two differ as
+         soon as a device swaps under a live PTT, and the tone harness hands
+         beginTx a track no mic module ever saw. */
+      expect(mesh.peer.call.mock.calls[0][1].getAudioTracks()).toEqual([tone]);
       const newId = mesh.peer.call.mock.calls[0][0];
       expect(mesh.legs.get(newId)).toMatchObject({ slot: 1, mode: 'live' });
       mesh.leave();
@@ -258,24 +273,113 @@ describe('beginTx — empty-legs first-tap sweep mirrors watchdog zero-leg rule'
     const prevMax = mesh.cfg.maxSlots;
     mesh.cfg.maxSlots = 3;
     try {
-      const live = { id: 'live-mic-stream' };
+      const tone = { kind: 'audio', id: 'tone-track' };
       mesh.peer = { destroyed: false, call: vi.fn((id) => fakeCall(id, null)) };
-      mesh.mic = { stream: live };
+      mesh.mic = { stream: { id: 'live-mic-stream' } };
       mesh.channel = '22';
       mesh.slot = 0;
       mesh._seenPeers.add(1);
       mesh._seenPeers.add(2);
       mesh._dialFails.set(1, 3);                       // parked — TX must not unpark
 
-      const report = await mesh.beginTx({ kind: 'audio' });
+      const report = await mesh.beginTx(tone);
 
       expect(mesh.peer.call).toHaveBeenCalledTimes(1); // only slot 2, slot 1 skipped
       expect(report).toEqual({ attached: 0, redialed: 1 });
-      expect(mesh.peer.call.mock.calls[0][1]).toBe(live);
+      expect(mesh.peer.call.mock.calls[0][1].getAudioTracks()).toEqual([tone]);
       mesh.leave();
     } finally {
       mesh.cfg.maxSlots = prevMax;
       set({ secret: null });
+    }
+  });
+});
+
+describe('mid-TX leg creation carries the PTT track, not mic.stream', () => {
+  it('a listen dial while PTT is live sends the TX audio (mode live)', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    try {
+      const { mesh } = makeMesh();
+      const tone = { kind: 'audio', id: 'tone-track' };
+      mesh.peer = { destroyed: false, call: vi.fn((id) => fakeCall(id, null)) };
+      mesh.mic = { stream: { id: 'live-mic-stream' } };
+      mesh.channel = '22';
+      mesh.slot = 0;
+
+      await mesh.beginTx(tone);         // no legs, no peers: just arms the TX track
+      mesh._dialListen(3);
+      await vi.waitFor(() => expect(mesh.peer.call).toHaveBeenCalledTimes(1));
+
+      expect(mesh.peer.call.mock.calls[0][1].getAudioTracks()).toEqual([tone]);
+      const dialed = [...mesh.legs.values()][0];
+      expect(dialed).toMatchObject({ slot: 3, mode: 'live' });
+
+      /* After the release the same dial must fall back to the silent
+         carrier — a post-TX leg may not keep the microphone hot. */
+      mesh.endTx();
+      silentStream.mockReturnValueOnce({ getAudioTracks: () => ['SILENT_TRACK'] });
+      mesh._dialListen(2);
+      await vi.waitFor(() => expect(mesh.peer.call).toHaveBeenCalledTimes(2));
+
+      const second = mesh.peer.call.mock.calls[1][1];
+      expect(second.getAudioTracks()).toEqual(['SILENT_TRACK']);
+      expect([...mesh.legs.values()][1]).toMatchObject({ slot: 2, mode: 'listen' });
+      mesh.leave();
+    } finally {
+      set({ secret: null });
+    }
+  });
+
+  it('an inbound call during TX is answered with the TX track, not the mic', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    try {
+      const { mesh } = makeMesh();
+      const tone = { kind: 'audio', id: 'tone-track' };
+      const micStream = { id: 'live-mic-stream', getAudioTracks: () => [{ kind: 'audio', id: 'mic-track' }] };
+      mesh.peer = { destroyed: false, call: vi.fn() };
+      mesh.mic = { stream: micStream, hot: true };
+      mesh.channel = '22';
+      mesh.slot = 0;
+      set({ tx: true });
+
+      const peerId = await slotPeerId('ABC234DEFGHJKLMN', '22', 1);
+      const call = fakeCall(peerId, fakeSender());
+
+      await mesh.beginTx(tone);         // PTT live: the mesh now holds the TX track
+      mesh._onInbound(call);
+      await vi.waitFor(() => expect(call.answer).toHaveBeenCalled());
+
+      const answered = call.answer.mock.calls[0][0];
+      expect(answered.getAudioTracks()).toEqual([tone]);
+      expect(answered.getAudioTracks()).not.toEqual(micStream.getAudioTracks());
+      mesh.endTx();
+      mesh.leave();
+    } finally {
+      set({ tx: false, secret: null });
+    }
+  });
+
+  it('without a live TX the same inbound call still answers with the mic', async () => {
+    set({ secret: 'ABC234DEFGHJKLMN' });
+    try {
+      const { mesh } = makeMesh();
+      const micStream = { id: 'live-mic-stream', getAudioTracks: () => [{ kind: 'audio', id: 'mic-track' }] };
+      mesh.peer = { destroyed: false, call: vi.fn() };
+      mesh.mic = { stream: micStream, hot: true };
+      mesh.channel = '22';
+      mesh.slot = 0;
+      set({ tx: true });
+
+      const peerId = await slotPeerId('ABC234DEFGHJKLMN', '22', 1);
+      const call = fakeCall(peerId, fakeSender());
+
+      mesh._onInbound(call);
+      await vi.waitFor(() => expect(call.answer).toHaveBeenCalled());
+
+      expect(call.answer).toHaveBeenCalledWith(micStream);
+      mesh.leave();
+    } finally {
+      set({ tx: false, secret: null });
     }
   });
 });

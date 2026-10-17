@@ -90,8 +90,11 @@ export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
             `pc=${pc.connectionState}/ice=${(pc as RTCPeerConnection & { iceConnectionState?: string }).iceConnectionState}` +
             ` sctp=${sctp?.state ?? 'none'} dc=${leg.call?.dataChannel?.readyState ?? 'none'}` +
             ` senders=${pc.getSenders().length} receivers=${pc.getReceivers().length}` +
-            ` txTransform=${pc.getSenders().filter((s) => 'transform' in s).length}` +
-            ` rxTransform=${pc.getReceivers().filter((r) => 'transform' in r).length}` +
+            /* 'transform' in sender is true in every engine that HAS the API
+               (prototype accessor) — it must not be read as "a transform is
+               attached", which cost a triage round trip. */
+            ` txTransform=${pc.getSenders().filter((s) => (s as { transform?: unknown }).transform != null).length}` +
+            ` rxTransform=${pc.getReceivers().filter((r) => (r as { transform?: unknown }).transform != null).length}` +
             ` candidates=${candidates} pairs=${pairs} bytesSent=${sent} bytesRecv=${recv} frames=${frames}`;
         }
         legs.push(`UNIT-${leg.slot} crypto=${String(leg.crypto)} ${detail}`);
