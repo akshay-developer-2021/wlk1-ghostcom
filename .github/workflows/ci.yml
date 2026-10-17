@@ -118,3 +118,33 @@ jobs:
       - name: app log
         if: failure()
         run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || cat test-results/logs/*.jsonl
+
+  # The three-engine room: one session, three browsers, one mesh. A pair
+  # proves a leg between two engines; only a triple proves that every unit
+  # links to both others, that all six legs are transforming real frames, and
+  # that a departure leaves the survivors honest.
+  #
+  # Advisory (continue-on-error) for a resource reason, not a correctness one:
+  # three extra browser processes on top of the one Playwright runs is the OOM
+  # edge of a ~4 GB runner — the pair job above already needs max-parallel: 1
+  # for two. Every leg it checks is also covered by the enforced pairs; what it
+  # adds is coverage of the mesh rather than of a leg.
+  e2e-triple:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium webkit firefox
+      - run: npm run build
+        env:
+          BASE_PATH: /wlk1-ghostcom/
+      - name: three-engine session
+        run: npm run test:e2e:triple
+      - name: app log
+        if: failure()
+        run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || ls -R test-results

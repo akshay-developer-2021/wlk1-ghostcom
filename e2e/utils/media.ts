@@ -76,6 +76,32 @@ export const COLD_MIC_SCRIPT = (delayMs: number): void => {
     suite does not spend its life waiting. */
 export const COLD_MIC_MS = 2500;
 
+/**
+ * Firefox prefs the suite needs, in one place because they have to be passed
+ * at every launch site: a manual browserType.launch() does NOT inherit the
+ * running project's launchOptions, so a cross-engine lane that launches its
+ * own Firefox gets stock defaults unless it passes these itself.
+ *
+ * All three are privacy defaults meant for real users:
+ *   · media.autoplay.block-webaudio — Web Audio stays suspended until the page
+ *     has sticky activation, which a headless runner never accumulates. The
+ *     shared silent context then never runs and the mesh refuses to dial.
+ *   · media.peerconnection.ice.loopback — two peers on one runner have only
+ *     loopback to pair on; without this there is nothing to gather.
+ *   · …obfuscate_host_addresses — mDNS-mangles host candidates that never
+ *     resolve between two processes on the same machine.
+ */
+export const FIREFOX_USER_PREFS: Record<string, boolean | number> = {
+  'media.navigator.streams.fake': true,
+  'media.navigator.permission.disabled': true,
+  'permissions.default.microphone': 1,
+  'media.autoplay.block-webaudio': false,
+  'media.autoplay.default': 0,
+  'media.autoplay.blocking_policy': 0,
+  'media.peerconnection.ice.loopback': true,
+  'media.peerconnection.ice.obfuscate_host_addresses': false,
+};
+
 /** Chromium-only: prefers the real fake device so the OS pipeline is used. */
 export function needsFakeMicStub(browserName: string): boolean {
   return browserName !== 'chromium';

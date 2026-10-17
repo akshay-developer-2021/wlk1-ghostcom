@@ -1,8 +1,8 @@
 import { test, expect, chromium, firefox, webkit, type Browser, type Page } from '@playwright/test';
 import { BATCH_SIZE, BROKER_CONFIG, BASE_URL, TLS_BROKER, INJECT_BROKER } from './utils/env';
-import { FAKE_MIC_SCRIPT, needsFakeMicStub, grantMicPermissions } from './utils/media';
+import { FAKE_MIC_SCRIPT, FIREFOX_USER_PREFS, needsFakeMicStub, grantMicPermissions } from './utils/media';
 import { applyBrokerConfig } from './utils/room';
-import { joinRoom } from './utils/room';
+import { joinRoom, joinRoomAll } from './utils/room';
 import { toneRoundTrip, leaveToJoin, assertEncryptedWire } from './utils/mesh-helpers';
 import { assertPeerCount, assertPeerChips, assertScreenVisible, assertSyncBar } from './utils/assertions';
 
@@ -34,7 +34,14 @@ async function launchUser(label: string, browserName = 'chromium'): Promise<{ br
      running project's launchOptions, so webkit/firefox silently got Chrome's
      flags. macOS ignores them, the Linux WebKit build dies on the first one
      ("Cannot parse arguments: Unknown option --use-fake-device-for-media-stream"). */
-  const browser = await type.launch({ args: browserName === 'chromium' ? LAUNCH_ARGS : [] });
+  /* A manual launch inherits the project's ARGS (which is how webkit used to
+     die on Chrome flags) but not its firefoxUserPrefs — so a hand-launched
+     Firefox ran with stock privacy defaults: Web Audio blocked and loopback
+     candidates withheld, hence a leg that never formed. */
+  const browser = await type.launch({
+    args: browserName === 'chromium' ? LAUNCH_ARGS : [],
+    ...(browserName === 'firefox' ? { firefoxUserPrefs: FIREFOX_USER_PREFS } : {}),
+  });
   /* An injected TLS broker is self-signed (test artifact) — the context
      must accept it or every wss handshake dies. */
   const context = await browser.newContext({ ignoreHTTPSErrors: TLS_BROKER && INJECT_BROKER });
@@ -147,6 +154,74 @@ for (const pair of CROSS_PAIRS) {
       await assertSyncBar(bob.page, 'ON CHANNEL — NO OTHER UNITS');
     } finally {
       await Promise.allSettled([alice.browser.close(), bob.browser.close()]);
+    }
+  });
+}
+
+/**
+ * The three-engine room.
+ *
+ * A pair proves one leg between two engines. Only a triple proves the mesh:
+ * three units that all claimed slots and must therefore all be linked to
+ * BOTH others, six legs transforming real frames in both directions, and a
+ * departure that has to leave the two survivors each honest about LNK 1 —
+ * the teardown path where a departing peer must not take the other legs down
+ * with it. Three real browsers on one machine, which is also the heaviest
+ * thing in the suite.
+ *
+ * Opt-in like the pairs, for the same reason plus memory:
+ *   E2E_CROSS_TRIPLE=chromium:webkit:firefox npm run test:e2e:triple
+ */
+const TRIPLE = (process.env['E2E_CROSS_TRIPLE'] ?? '')
+  .split(':')
+  .map((t) => t.trim())
+  .filter(Boolean);
+
+if (TRIPLE.length >= 3) {
+  test(`cross-engine triple: ${TRIPLE.join(' + ')}`, async () => {
+    const crew: { engine: string; browser: Browser; page: Page }[] = [];
+    for (const [i, engine] of TRIPLE.entries()) {
+      const u = await launchUser(`${engine}-${i}`, engine);
+      crew.push({ engine, ...u });
+    }
+    const users = crew;
+    try {
+      await joinRoomAll(users.map((u) => u.page));
+
+      /* Full mesh: every unit linked to every other unit, so each side reads
+         two remote chips — not just "something connected". */
+      for (const u of users) {
+        await assertPeerCount(u.page, TRIPLE.length - 1);
+        await assertPeerChips(u.page, TRIPLE.length - 1);
+        /* Per-page counters cover all six legs: outbound to two peers,
+           inbound from two. */
+        console.log(`wire ${u.engine}:`, JSON.stringify(await assertEncryptedWire(u.page, u.engine)));
+      }
+
+      /* A real tone in every direction a recorder can measure. WebKit cannot
+         decode its own MediaRecorder output, so a direction is unmeasurable
+         exactly when the RECEIVER is WebKit — the mesh assertions above are
+         what cover those legs. */
+      for (const sender of users) {
+        for (const receiver of users) {
+          if (sender === receiver || receiver.engine === 'webkit') continue;
+          await toneRoundTrip(sender.page, receiver.page, 1000, 2000, `triple-${sender.engine}-${receiver.engine}`);
+        }
+      }
+
+      /* One leaves. Both survivors stay on the air and each drops exactly one
+         unit — a mesh that forgets a leaver, or collapses to zero, fails
+         here even though every leg was healthy a moment ago. */
+      const [leaver, ...survivors] = users;
+      if (!leaver) throw new Error('triple needs at least three engines');
+      await leaveToJoin(leaver.page);
+      for (const u of survivors) {
+        await assertScreenVisible(u.page, 'radio');
+        await assertPeerCount(u.page, 1);
+        await assertPeerChips(u.page, 1);
+      }
+    } finally {
+      await Promise.allSettled(users.map((u) => u.browser.close()));
     }
   });
 }

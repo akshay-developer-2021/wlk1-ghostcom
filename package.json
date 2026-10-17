@@ -1,6 +1,6 @@
 {
   "name": "wlk1-ghostcom",
-  "description": "WLK-1 GHOSTCOM — encrypted P2P field radio (production)",
+  "description": "WLK-1 GHOSTCOM \u2014 encrypted P2P field radio (production)",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -20,6 +20,7 @@
     "verify": "npm run typecheck && npm test && npm run build && npm run test:e2e",
     "test:e2e:all": "playwright test",
     "test:e2e:webkit": "playwright test --project=webkit",
+    "test:e2e:triple": "E2E_CROSS_TRIPLE=chromium:webkit:firefox playwright test e2e/batch-1x1.spec.ts -g \"triple\" --project=chromium --workers=1",
     "test:e2e:firefox": "playwright test --project=firefox"
   },
   "dependencies": {

@@ -49,20 +49,33 @@ export async function endTx(page: Page): Promise<void> {
 }
 
 /** Record every remote audio element. Returns a stop handle. */
-export async function startRecording(page: Page): Promise<string> {
+export async function startRecording(page: Page, slot?: number): Promise<string> {
   const handle = `rec_${Date.now()}`;
-  await page.evaluate((h: string) => {
+  await page.evaluate(({ h, want }: { h: string; want?: number }) => {
     const w = window as unknown as { [k: string]: unknown };
     const chunks: Blob[] = [];
     w.__testChunks = chunks;
 
+    /* Record ONE peer, not the mix. Slots are room-global (peer ids are
+       HMAC(secret, slot)), so the sender's own slot identifies its element
+       here. Mixing every remote track works by accident with two peers and
+       is wrong with three: the recording stops being the sender's stream and
+       the analyser reports duration 0 instead of the truth. */
+    const selector = typeof want === 'number' ? `audio[data-remote="${want}"]` : 'audio[data-remote]';
     const stream = new MediaStream();
-    for (const el of document.querySelectorAll<HTMLAudioElement>('audio[data-remote]')) {
+    let matched = 0;
+    for (const el of document.querySelectorAll<HTMLAudioElement>(selector)) {
       const src = el.srcObject;
       if (!(src instanceof MediaStream)) continue;
+      matched++;
       for (const track of src.getTracks()) stream.addTrack(track);
     }
-    if (stream.getTracks().length === 0) throw new Error('no remote tracks to record — mesh not linked');
+    if (stream.getTracks().length === 0) {
+      throw new Error(
+        `no remote tracks to record${typeof want === 'number' ? ` for UNIT-${want}` : ''} — mesh not linked`,
+      );
+    }
+    (w as unknown as { __testMatched: number }).__testMatched = matched;
 
     /* WebKit has no webm/opus — fall back through what this engine records */
     const mime = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus']
@@ -72,7 +85,7 @@ export async function startRecording(page: Page): Promise<string> {
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     recorder.start(100);
     w[h] = recorder;
-  }, handle);
+  }, { h: handle, want: slot });
   return handle;
 }
 

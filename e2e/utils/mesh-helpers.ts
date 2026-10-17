@@ -70,7 +70,10 @@ export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
             if (r.type === 'outbound-rtp' && r.kind === 'audio') sent += Number(v.bytesSent ?? 0);
             if (r.type === 'inbound-rtp' && r.kind === 'audio') {
               recv += Number(v.bytesReceived ?? 0);
-              frames = Math.max(frames, Number(v.frameCount ?? 0));
+              /* frameCount is Chromium-only and absent in Firefox/WebKit,
+                 which report framesDecoded — reading only frameCount prints a
+                 confident 0 for a leg that delivered bytes. */
+              frames = Math.max(frames, Number(v.frameCount ?? 0), Number(v.framesDecoded ?? 0));
             }
           });
           detail =
@@ -93,25 +96,31 @@ export async function meshDiagnostics(page: Page, tail = 14): Promise<string> {
 }
 
 /**
- * LNK counts REMOTE units (self is never in the peers map), so a
- * 2-user room reads LNK 1 with one chip per side.
+ * Every page in the room must see `expected` REMOTE units and chips.
  *
- * On timeout both pages dump what they know, so the failure names the cause
+ * LNK counts remote units only (self is never in the peers map), so a 2-user
+ * room reads LNK 1 and a 3-user room LNK 2.
+ *
+ * On timeout every page dumps what it knows, so the failure names the cause
  * instead of only the symptom.
  */
-export async function waitForMeshLink(pageA: Page, pageB: Page, timeout = 30000): Promise<void> {
-  await Promise.all([waitForPeerId(pageA, timeout), waitForPeerId(pageB, timeout)]);
+export async function waitForMeshLinkAll(pages: Page[], expected: number, timeout = 30000): Promise<void> {
+  await Promise.all(pages.map((p) => waitForPeerId(p, timeout)));
+  const want = String(expected);
   try {
-    await Promise.all([
-      expect(pageA.locator('#lnkCount')).toHaveText('1', { timeout }),
-      expect(pageB.locator('#lnkCount')).toHaveText('1', { timeout }),
-    ]);
-    await expect(pageA.locator('.chip')).toHaveCount(1, { timeout: 5000 });
-    await expect(pageB.locator('.chip')).toHaveCount(1, { timeout: 5000 });
+    await Promise.all(pages.map((p) => expect(p.locator('#lnkCount')).toHaveText(want, { timeout })));
+    await Promise.all(pages.map((p) => expect(p.locator('.chip')).toHaveCount(expected, { timeout: 5000 })));
   } catch (err) {
-    const [a, b] = await Promise.all([meshDiagnostics(pageA), meshDiagnostics(pageB)]);
-    throw new Error(`${(err as Error).message}\n── pageA ──\n${a}\n── pageB ──\n${b}`);
+    const dumps = await Promise.all(pages.map((p) => meshDiagnostics(p)));
+    throw new Error(
+      `${(err as Error).message}\n` + dumps.map((d, i) => `── page ${i + 1} ──\n${d}`).join('\n'),
+    );
   }
+}
+
+/** Two-user room: LNK 1 on both sides. */
+export async function waitForMeshLink(pageA: Page, pageB: Page, timeout = 30000): Promise<void> {
+  await waitForMeshLinkAll([pageA, pageB], 1, timeout);
 }
 
 /** Close the first-run hint overlay if it is showing. */
@@ -321,8 +330,14 @@ export async function toneRoundTrip(
   await injectTxTrack(pageTx, freq, holdMs + 1500);
   await startTx(pageTx);
 
+  /* The sender's slot picks which remote stream the receiver records — the
+     one thing that matters as soon as a receiver has more than one peer. */
+  const senderSlot = await pageTx.evaluate(
+    () => (window as unknown as { mesh?: { slot?: number } }).mesh?.slot ?? 0,
+  );
+
   await pageRx.waitForTimeout(400); // let the track reach the sender chain
-  const handle = await startRecording(pageRx);
+  const handle = await startRecording(pageRx, senderSlot);
   await pageRx.waitForTimeout(holdMs);
   const audio = await stopRecording(pageRx, handle);
 
@@ -331,7 +346,16 @@ export async function toneRoundTrip(
   const analysis = await analyzeAudio(pageRx, audio);
   analysis.passed = verifyAudio(analysis, freq, holdMs);
   await saveAudio(audio, label);
-  expect(analysis.passed, `tone ${freq}Hz — analysis ${JSON.stringify(analysis)}`).toBe(true);
+  if (!analysis.passed) {
+    /* Silence has several causes that need different fixes: no media reached
+       the receiver, the leg is muted because its crypto verdict never
+       settled, or playback is blocked. The receiving page's own state says
+       which. */
+    const [tx, rx] = await Promise.all([meshDiagnostics(pageTx, 8), meshDiagnostics(pageRx, 8)]);
+    throw new Error(
+      `tone ${freq}Hz (${label}) — analysis ${JSON.stringify(analysis)}\n── TX ──\n${tx}\n── RX ──\n${rx}`,
+    );
+  }
 }
 
 /** Adjust volume slider by absolute percent. */

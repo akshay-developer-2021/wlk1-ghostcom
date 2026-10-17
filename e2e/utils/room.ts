@@ -9,7 +9,7 @@
  */
 
 import { Page } from '@playwright/test';
-import { waitForMeshLink, closeHint, unlockAudio } from './mesh-helpers';
+import { waitForMeshLinkAll, closeHint, unlockAudio } from './mesh-helpers';
 import { BASE_URL, BROKER_CONFIG, ROOM_CHANNEL, INJECT_BROKER } from './env';
 
 export { BROKER_CONFIG, BASE_URL };
@@ -49,21 +49,28 @@ export interface Room {
  * `dismissHint: false` leaves the first-run hint open so a journey can assert
  * that it actually appeared.
  */
-export async function joinRoom(
-  pageA: Page,
-  pageB: Page,
+export async function joinRoomAll(
+  pages: Page[],
   { channel = ROOM_CHANNEL, dismissHint = true }: { channel?: string; dismissHint?: boolean } = {},
 ): Promise<Room> {
   const secret = generateRoomSecret();
   const link = `${BASE_URL}/#${channel}.${secret}`;
 
-  await Promise.all([
-    pageA.goto(link, { waitUntil: 'networkidle' }),
-    pageB.goto(link, { waitUntil: 'networkidle' }),
-  ]);
-  await Promise.all([unlockAudio(pageA), unlockAudio(pageB)]);
-  await waitForMeshLink(pageA, pageB);
-  if (dismissHint) await Promise.all([closeHint(pageA), closeHint(pageB)]);
+  await Promise.all(pages.map((p) => p.goto(link, { waitUntil: 'networkidle' })));
+  await Promise.all(pages.map(unlockAudio));
+  await waitForMeshLinkAll(pages, pages.length - 1);
+  if (dismissHint) await Promise.all(pages.map(closeHint));
 
   return { secret, link };
+}
+
+/** Boot both pages into the same fresh room and wait until they are linked.
+    `dismissHint: false` leaves the first-run hint open so a journey can assert
+    that it actually appeared. */
+export async function joinRoom(
+  pageA: Page,
+  pageB: Page,
+  opts: { channel?: string; dismissHint?: boolean } = {},
+): Promise<Room> {
+  return joinRoomAll([pageA, pageB], opts);
 }
