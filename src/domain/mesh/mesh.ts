@@ -18,7 +18,7 @@ import { Peer, type DataConnection, type LogLevel } from 'peerjs';
 import { CONFIG, type AppConfig } from '../../config.js';
 import { slotPeerId, callerSlot, sasCode } from '../crypto/crypto.js';
 import { set, state, setPeer, removePeer, clearPeers, linkedSlots } from '../state/state.js';
-import { silentStream, getSilentTrack, silentContextRunning } from '../audio/silentTrack.js';
+import { silentStream, getSilentTrack, silentContextRunning, silentContextState } from '../audio/silentTrack.js';
 import type { MicManager } from '../audio/mic.js';
 import type { Sfx } from '../audio/sfx.js';
 import type { E2EE } from '../security/e2ee.js';
@@ -469,7 +469,7 @@ export class Mesh {
          negotiates around a zero-frame source. Skip; the unlock handler
          retries after the first tap, TX redial is the backstop. */
       if (!silentContextRunning()) {
-        this.log(`UNIT-${slot} — AUDIO NOT READY, RETRY ON TAP`, 'warn');
+        this.log(`UNIT-${slot} — AUDIO NOT READY (ctx ${silentContextState()}), RETRY ON TAP`, 'warn');
         return;
       }
       const stream = silentStream();
@@ -477,7 +477,7 @@ export class Mesh {
       if (!stream || tracks.length === 0) {
         // No sender available (AudioContext locked pre-gesture on Safari).
         // Skip — watchdog / unlock handler retries after first tap.
-        this.log(`UNIT-${slot} — AUDIO NOT READY, RETRY ON TAP`, 'warn');
+        this.log(`UNIT-${slot} — AUDIO NOT READY (no sender), RETRY ON TAP`, 'warn');
         return;
       }
       let call: ReturnType<Peer['call']> | null = null;

@@ -19,6 +19,18 @@ const FIREFOX_PREFS = {
   'media.navigator.streams.fake': true,
   'media.navigator.permission.disabled': true,
   'permissions.default.microphone': 1,
+  /* Firefox blocks Web Audio until the page has sticky activation
+     (media.autoplay.block-webaudio, default true). Headless runners never
+     accumulate one, so the shared silent context stayed suspended, the mesh
+     refused to dial ("AUDIO NOT READY") and no leg ever formed. */
+  'media.autoplay.block-webaudio': false,
+  'media.autoplay.default': 0,
+  'media.autoplay.blocking_policy': 0,
+  /* Two peers on ONE runner: Firefox withholds loopback candidates and
+     mDNS-obfuscates host addresses by default, leaving the pair with nothing
+     to pair on. Both are privacy defaults meant for real users. */
+  'media.peerconnection.ice.loopback': true,
+  'media.peerconnection.ice.obfuscate_host_addresses': false,
 };
 
 const shared = {

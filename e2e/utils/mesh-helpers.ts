@@ -208,10 +208,12 @@ async function wireStats(page: Page): Promise<{ enc: { drops: number; n: number 
  * passes on a pipeline that is not running.
  */
 export async function assertEncryptedWire(page: Page, who: string): Promise<{ enc: number; dec: number }> {
-  const deadline = Date.now() + 8000;
+  const deadline = Date.now() + 30_000;
   let stats = await wireStats(page);
-  /* Frames take a moment to flow after the link; poll rather than sample
-     once, or the assertion measures the gap instead of the pipeline. */
+  /* Frames take a while to flow on a loaded runner: the link reads as
+     established the moment the remote description lands, long before ICE,
+     DTLS and the first packets. Poll rather than sample once, or the
+     assertion measures that gap instead of the pipeline. */
   while (Date.now() < deadline && !(stats && stats.enc.n > 0 && stats.dec.n > 0)) {
     await page.waitForTimeout(250);
     stats = await wireStats(page);

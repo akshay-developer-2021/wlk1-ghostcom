@@ -20,6 +20,12 @@ export function silentContextRunning(): boolean {
   return silentCtx?.state === 'running';
 }
 
+/** The context state for diagnostics: "AUDIO NOT READY" on its own cannot
+    tell a gesture-locked context from one whose device refuses to start. */
+export function silentContextState(): string {
+  return silentCtx?.state ?? 'none';
+}
+
 /* Resume (or create) the shared silent AudioContext. Must run inside a
    user gesture on Safari, otherwise the context stays suspended and the
    track never goes live — which breaks outbound legs cross-browser. */
