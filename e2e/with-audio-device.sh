@@ -20,12 +20,16 @@ set -euo pipefail
 
 if [ "${WLK1_AUDIO_DEVICE:-0}" = "1" ]; then
   sudo apt-get install -y --no-install-recommends pulseaudio
-  # The browser is a PulseAudio CLIENT: it must find that server, and the
-  # socket dir must be private to us or PulseAudio refuses to start.
+  # XDG_RUNTIME_DIR alone, and NOT PULSE_SERVER: exported before the daemon
+  # exists, pulseaudio reads it as "use this server" and refuses to start
+  # ("User-configured server at …, refusing to start/autospawn" — measured),
+  # and the default socket is $XDG_RUNTIME_DIR/pulse/native anyway — which is
+  # also how the browser finds the server. The dir must be private to us or
+  # PulseAudio refuses to run.
   export XDG_RUNTIME_DIR=/tmp/wlk1-pa
-  export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
   mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
   pulseaudio --start --exit-idle-time=-1 --disallow-exit
+  pgrep -x pulseaudio >/dev/null || { echo "PULSEAUDIO DID NOT START — the sink below cannot exist"; exit 1; }
   pactl load-module module-null-sink sink_name=wlk1_dummy
   pactl set-default-sink wlk1_dummy
   pactl info | head -3
