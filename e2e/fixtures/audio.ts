@@ -12,6 +12,13 @@ export interface AudioAnalysis {
   freq: number;      // dominant frequency in Hz (zero-crossing estimate)
   duration: number;  // active-region duration in ms
   rms: number;       // root-mean-square amplitude (0-1)
+  /* Reported, not asserted: `freq` alone decides. A starved audio thread drops
+     samples between crossings, which reads LOW (a clean 1000Hz tone measured
+     941Hz on a device-less WebKit sender), while an ear hears the pitch in
+     what did arrive. medianFreq is that pitch; glitches counts the crossing
+     intervals far off it, so a red run says which of the two happened. */
+  medianFreq: number;
+  glitches: number;
   passed: boolean;
 }
 
@@ -147,20 +154,27 @@ export async function analyzeAudio(page: Page, base64: string): Promise<AudioAna
       }
     }
 
-    let freq = 0, duration = 0;
+    let freq = 0, duration = 0, medianFreq = 0, glitches = 0;
     if (first >= 0 && last > first) {
       const active = last - first + 1;
       duration = (active / sampleRate) * 1000;
       /* one count per positive-going crossing (hysteresis at the gate) */
       let crossings = 0, armed = false;
+      const marks: number[] = [];
       for (let i = Math.max(0, first - Math.round(sampleRate * 0.01)); i <= last; i++) {
         const v = samples[i]!;
         if (!armed && v < -gate) armed = true;
-        else if (armed && v > gate) { crossings++; armed = false; }
+        else if (armed && v > gate) { crossings++; armed = false; marks.push(i); }
       }
       freq = crossings / (active / sampleRate);
+      const gaps: number[] = [];
+      for (let k = 1; k < marks.length; k++) gaps.push(marks[k]! - marks[k - 1]!);
+      gaps.sort((a, b) => a - b);
+      const median = gaps.length ? gaps[gaps.length >> 1]! : 0;
+      medianFreq = median ? sampleRate / median : 0;
+      glitches = median ? gaps.filter((g) => g > median * 1.5 || g < median * 0.5).length : 0;
     }
-    return { freq, duration, rms };
+    return { freq, duration, rms, medianFreq, glitches };
   }, base64);
 
   return { ...result, passed: false };

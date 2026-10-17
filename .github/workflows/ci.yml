@@ -48,14 +48,15 @@ jobs:
       - run: npm run build
       - run: npm run test:e2e:webkit
 
-  # Firefox — kept advisory (continue-on-error) until one green run proves
-  # the engine end to end, then flip it into the enforced set. Its earlier
-  # red was a HARNESS bug, not the browser: Playwright Firefox has no
-  # 'microphone' permission name, so grantPermissions threw and failed
-  # every test. The engine is now pre-approved via firefoxUserPrefs.
+  # Firefox, enforced (2026-10-17). The engine that fails differently: its
+  # audio device comes from e2e/with-audio-device.sh — without one its
+  # AudioContext never leaves "suspended", every dial bails with AUDIO NOT
+  # READY, and (before the unlock learned to dial once the context runs)
+  # nothing ever retried. Its microphone permission is pre-approved via
+  # firefoxUserPrefs: Playwright Firefox has no 'microphone' permission name
+  # at all, so grantPermissions throws.
   e2e-matrix:
     runs-on: ubuntu-latest
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -110,13 +111,18 @@ jobs:
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run build
       # One step for the setup and the command: see e2e/with-audio-device.sh.
-      # Only the firefox pairing needs the device; the pair decides.
+      # EVERY pair gets the device, not just the firefox ones: a device-less
+      # WebKit engine drives its audio pipeline off a starving timer instead of
+      # a device clock, and the tone it sends arrives with dropped samples
+      # (measured: 941Hz for a 1000Hz tone in this pairing, while the same
+      # WebKit->chromium and WebKit->firefox tones measure clean in the triple
+      # lane, which has the sink). The engine is what is on trial here.
       - name: cross-engine session ${{ matrix.pair }}
         run: e2e/with-audio-device.sh npx playwright test e2e/batch-1x1.spec.ts -g "cross-engine" --project=chromium --workers=1
         env:
           E2E_CROSS_PAIRS: ${{ matrix.pair }}
           E2E_BATCH: 1
-          WLK1_AUDIO_DEVICE: ${{ contains(matrix.pair, 'firefox') && '1' || '0' }}
+          WLK1_AUDIO_DEVICE: '1'
       - name: app log
         if: failure()
         run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || cat test-results/logs/*.jsonl
@@ -126,7 +132,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: audio-${{ matrix.pair }}
+          name: audio-${{ replace(matrix.pair, ':', '-') }}
           path: test-results/audio
           if-no-files-found: ignore
 
@@ -157,14 +163,13 @@ jobs:
   # links to both others, that all six legs are transforming real frames, and
   # that a departure leaves the survivors honest.
   #
-  # Advisory (continue-on-error) for a resource reason, not a correctness one:
+  # Enforced (2026-10-17), with the resource risk named instead of hidden:
   # three extra browser processes on top of the one Playwright runs is the OOM
   # edge of a ~4 GB runner — the pair job above already needs max-parallel: 1
-  # for two. Every leg it checks is also covered by the enforced pairs; what it
-  # adds is coverage of the mesh rather than of a leg.
+  # for two. If it ever reds with "Target page, context or browser has been
+  # closed", that is memory, and the step list is where to buy some back.
   e2e-triple:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
