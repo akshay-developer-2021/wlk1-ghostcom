@@ -30,9 +30,19 @@ if [ "${WLK1_AUDIO_DEVICE:-0}" = "1" ]; then
   mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
   pulseaudio --start --exit-idle-time=-1 --disallow-exit
   pgrep -x pulseaudio >/dev/null || { echo "PULSEAUDIO DID NOT START — the sink below cannot exist"; exit 1; }
-  pactl load-module module-null-sink sink_name=wlk1_dummy
+  # 48000, the rate real desktops use and the rate WebRTC encodes at. The
+  # default (44100) forces a conversion inside WebKitGTK on every outbound
+  # frame — the one stage where the wire was measured to carry uninitialized
+  # data instead of the source (see HANDOFF round 5).
+  pactl load-module module-null-sink sink_name=wlk1_dummy rate=48000
   pactl set-default-sink wlk1_dummy
+  # What this attempt actually got: a flip that happens roughly half the time
+  # must not be blamed on code before these are known to be constant.
+  echo "── audio env ──"
+  uname -r; nproc
+  dpkg-query -W -f='${Package} ${Version}\n' pulseaudio 2>/dev/null || true
   pactl info | head -3
+  pactl list sinks | grep -E "Name:|Sample Rate:" | head -6
   pactl list short sinks | grep -q wlk1_dummy || { echo "NO NULL SINK — Firefox has no audio device"; exit 1; }
 fi
 

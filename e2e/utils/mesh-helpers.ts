@@ -534,6 +534,12 @@ export async function toneRoundTrip(
   }
 
   await injectTxTrack(pageTx, freq, holdMs + 1500);
+  /* Every attempt, green or red: the rate the engine actually opened. The
+     failure message carries it too, but a GREEN run's rate is what proves a
+     48000 sink apart from a 44100 one. */
+  console.log(`[tone] ${label} sender ctx ${await pageTx.evaluate(
+    () => (window as unknown as { __testTxRate?: number }).__testTxRate ?? null,
+  )}Hz`);
   await startTx(pageTx);
   const txTrack = await senderTrackId(pageTx);   // beginTx awaited replaceTrack
 
