@@ -50,9 +50,21 @@ export async function injectTxTrack(page: Page, freq: number, durationMs: number
     source.buffer = buffer;
     const dest = ctx.createMediaStreamDestination();
     source.connect(dest);
+    /* A tap on the SAME context: the generator's own word on what it
+       rendered, readable later without MediaRecorder (WebKitGTK does not
+       expose it at all) and without a second AudioContext (which could
+       itself fail to pull — the very thing being measured). */
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+    /* Pulled by the graph like anything else: an unconnected tap may be
+       skipped by an engine and then reads a false silence. The sender page
+       hearing its own tone is harmless — CI renders into the null sink. */
+    analyser.connect(ctx.destination);
     source.start();
-    const w = window as unknown as { __testTxTrack: MediaStreamTrack; __testTxRate: number };
+    const w = window as unknown as { __testTxTrack: MediaStreamTrack; __testTxRate: number; __testTxAnalyser?: AnalyserNode };
     w.__testTxTrack = dest.stream.getAudioTracks()[0]!;
+    w.__testTxAnalyser = analyser;
     /* Read back, not assumed: an engine may hand out a rate it never
        honours, and that is the first thing a wrong reading needs. */
     w.__testTxRate = ctx.sampleRate;
@@ -76,28 +88,40 @@ export async function endTx(page: Page): Promise<void> {
 }
 
 /**
- * Record the INJECTED tone track itself, on the sender's page: the
- * generator's own word on what it produced, independent of the wire. An
- * engine whose audio render thread never pulls delivers NOTHING from a
- * MediaStreamDestination, and its encoder then sends whatever is in the
- * buffer — loud broadband noise (measured on the runner: 50% of the energy
- * above 13.5kHz). Without this, that is indistinguishable from a mesh bug.
+ * Read the tone generator's own output through the tap on its context.
+ * No reading or silence here means the engine never RENDERED the tone, and
+ * anything the far side then hears is the engine's own garbage — not a mesh
+ * bug. A clean reading here means the signal left the generator's graph
+ * intact, so whatever the far side heard was mangled afterwards: the engine's
+ * own track/encode path, or the wire.
  */
-export async function startTxRecording(page: Page): Promise<string> {
-  const handle = `txrec_${Date.now()}`;
-  await page.evaluate((h: string) => {
-    const w = window as unknown as { [k: string]: unknown; __testTxTrack?: MediaStreamTrack };
-    const chunks: Blob[] = [];
-    w.__testChunks = chunks;
-    const track = w.__testTxTrack;
-    if (!track) throw new Error('no injected tone track to record');
-    const mime = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus']
-      .find((m) => MediaRecorder.isTypeSupported(m));
-    const recorder = new MediaRecorder(new MediaStream([track]), mime ? { mimeType: mime } : undefined);
-    w[h] = recorder;
-    recorder.start(100);
-  }, handle);
-  return handle;
+export async function measureTxTone(page: Page, samples = 6): Promise<{ freq: number; rms: number }> {
+  return page.evaluate(async (n: number) => {
+    const w = window as unknown as { __testTxAnalyser?: AnalyserNode; __testTxRate?: number };
+    const analyser = w.__testTxAnalyser;
+    if (!analyser) throw new Error('no tone tap — injectTxTrack did not run');
+    const bucket = new Float32Array(analyser.fftSize);
+    const rate = w.__testTxRate ?? 0;
+    let best = 0, peak = 0;
+    for (let k = 0; k < n; k++) {
+      await new Promise((r) => setTimeout(r, 50));
+      analyser.getFloatTimeDomainData(bucket);
+      let sum = 0;
+      for (let i = 0; i < bucket.length; i++) sum += bucket[i]! * bucket[i]!;
+      const rms = Math.sqrt(sum / bucket.length);
+      if (rms > peak) peak = rms;
+      if (rms > 0.01 && rate) {
+        let crossings = 0, armed = false;
+        for (let i = 0; i < bucket.length; i++) {
+          const v = bucket[i]!;
+          if (!armed && v < 0) armed = true;
+          else if (armed && v > 0) { crossings++; armed = false; }
+        }
+        best = Math.max(best, (crossings * rate) / bucket.length);
+      }
+    }
+    return { freq: Math.round(best), rms: Number(peak.toFixed(4)) };
+  }, samples);
 }
 
 /** Record every remote audio element. Returns a stop handle. */

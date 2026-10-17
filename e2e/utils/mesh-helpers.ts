@@ -4,7 +4,7 @@ import {
   startTx,
   endTx,
   startRecording,
-  startTxRecording,
+  measureTxTone,
   stopRecording,
   analyzeAudio,
   verifyAudio,
@@ -478,21 +478,21 @@ export async function toneRoundTrip(
 
   await pageRx.waitForTimeout(400); // let the track reach the sender chain
   const handle = await startRecording(pageRx, senderSlot);
-  /* The generator's own output, recorded on the SENDER across the same
-     window: an engine whose audio thread never pulls makes its encoder send
-     garbage, and without this that noise is indistinguishable from a mesh
-     bug. Decoded on the receiver — WebKit cannot decode its own recordings. */
-  const txHandle = await startTxRecording(pageTx);
+  /* The generator's own output, through the tap on its context, sampled
+     across the same window the receiver records. This is the fact that
+     separates an engine that never rendered the tone — so the noise on the
+     wire is its own — from a generator that worked and a wire that lost it.
+     Concurrent, because the receiver's wait blocks this page otherwise. */
+  const txTonePromise = measureTxTone(pageTx).catch(() => null);
   await pageRx.waitForTimeout(holdMs);
   const audio = await stopRecording(pageRx, handle);
-  const txAudio = await stopRecording(pageTx, txHandle);
+  const txTone = await txTonePromise;
 
   await endTx(pageTx);
 
   const analysis = await analyzeAudio(pageRx, audio);
   analysis.passed = verifyAudio(analysis, freq, holdMs);
   await saveAudio(audio, label);
-  await saveAudio(txAudio, `${label}-tx`);
   if (!analysis.passed) {
     /* Silence has several causes that need different fixes: no media reached
        the receiver, the leg is muted because its crypto verdict never
@@ -523,10 +523,9 @@ export async function toneRoundTrip(
       const tracks = src?.getAudioTracks?.() ?? [];
       return { tracks: tracks.length, settings: tracks[0]?.getSettings?.() ?? null };
     }, senderSlot);
-    const selfCheck = txAudio ? await analyzeAudio(pageRx, txAudio).catch(() => null) : null;
     throw new Error(
       `tone ${freq}Hz (${label}) — analysis ${JSON.stringify(analysis)} (sender AudioContext ${txRate}Hz)\n` +
-      `generator (recorded on the sender): ${selfCheck ? JSON.stringify(selfCheck) : 'not captured'}\n` +
+      `generator (tap on its own context): ${txTone ? JSON.stringify(txTone) : 'not captured'}\n` +
       `sender tracks: injected ${sender.injected} (${sender.readyState}) vs PC holds ${JSON.stringify(sender.held)}\n` +
       `receiver tracks: ${JSON.stringify(rxCaps)}\n` +
       `── TX ──\n${tx}\n── RX ──\n${rx}`,
