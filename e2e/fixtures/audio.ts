@@ -24,14 +24,23 @@ export interface AudioAnalysis {
 
 /** Inject a pure sine tone as a MediaStreamTrack the mesh can transmit. */
 export async function injectTxTrack(page: Page, freq: number, durationMs: number): Promise<void> {
-  await page.evaluate(({ freq: f, durationMs: ms }) => {
-    /* The DEVICE's rate, never a forced 48000. A mic track carries the device
-       rate in production, and an engine that has to resample a 48k context
-       down to the runner's 44.1k sink does it with a seam per frame: the
-       tone arrives as a clean sine PLUS a click every ~20ms, the zero-crossing
-       counter reads the clicks, and a perfect 1000Hz tone measures 1277Hz
-       (measured, chromium<->webkit on a 44.1k null sink). */
+  await page.evaluate(async ({ freq: f, durationMs: ms }) => {
+    /* The DEVICE's rate, never a forced 48000: a mic track carries the device
+       rate in production, and the sender's resampler is not what is on trial
+       here. */
     const ctx = new AudioContext();
+    /* A generator that is not RUNNING sends nothing, and an engine asked to
+       encode a track that produces no frames hands its encoder whatever is in
+       the buffer: the recording was loud broadband noise — 50% of its energy
+       above 13.5kHz, flat envelope, a fresh spectrum every run — which is a
+       microphone-shaped artifact, never a tone. Measured: a fresh
+       AudioContext on WebKit is SUSPENDED (chromium's runs), and a gesture on
+       the page beforehand does not change that; only resume() does. Ask, then
+       say so rather than measure noise and blame the mesh. */
+    if (ctx.state === 'suspended') await ctx.resume().catch(() => { /* checked next */ });
+    if (ctx.state !== 'running') {
+      throw new Error(`tone generator did not start — AudioContext ${ctx.state} at ${ctx.sampleRate}Hz (engine has no output device?)`);
+    }
     const rate = ctx.sampleRate;
     const length = Math.ceil((ms / 1000) * rate);
     const buffer = ctx.createBuffer(1, length, rate);
