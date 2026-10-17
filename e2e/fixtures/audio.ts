@@ -75,6 +75,31 @@ export async function endTx(page: Page): Promise<void> {
   });
 }
 
+/**
+ * Record the INJECTED tone track itself, on the sender's page: the
+ * generator's own word on what it produced, independent of the wire. An
+ * engine whose audio render thread never pulls delivers NOTHING from a
+ * MediaStreamDestination, and its encoder then sends whatever is in the
+ * buffer — loud broadband noise (measured on the runner: 50% of the energy
+ * above 13.5kHz). Without this, that is indistinguishable from a mesh bug.
+ */
+export async function startTxRecording(page: Page): Promise<string> {
+  const handle = `txrec_${Date.now()}`;
+  await page.evaluate((h: string) => {
+    const w = window as unknown as { [k: string]: unknown; __testTxTrack?: MediaStreamTrack };
+    const chunks: Blob[] = [];
+    w.__testChunks = chunks;
+    const track = w.__testTxTrack;
+    if (!track) throw new Error('no injected tone track to record');
+    const mime = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus']
+      .find((m) => MediaRecorder.isTypeSupported(m));
+    const recorder = new MediaRecorder(new MediaStream([track]), mime ? { mimeType: mime } : undefined);
+    w[h] = recorder;
+    recorder.start(100);
+  }, handle);
+  return handle;
+}
+
 /** Record every remote audio element. Returns a stop handle. */
 export async function startRecording(page: Page, slot?: number): Promise<string> {
   const handle = `rec_${Date.now()}`;

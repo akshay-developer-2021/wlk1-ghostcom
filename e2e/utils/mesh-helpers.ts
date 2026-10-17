@@ -4,6 +4,7 @@ import {
   startTx,
   endTx,
   startRecording,
+  startTxRecording,
   stopRecording,
   analyzeAudio,
   verifyAudio,
@@ -477,14 +478,21 @@ export async function toneRoundTrip(
 
   await pageRx.waitForTimeout(400); // let the track reach the sender chain
   const handle = await startRecording(pageRx, senderSlot);
+  /* The generator's own output, recorded on the SENDER across the same
+     window: an engine whose audio thread never pulls makes its encoder send
+     garbage, and without this that noise is indistinguishable from a mesh
+     bug. Decoded on the receiver — WebKit cannot decode its own recordings. */
+  const txHandle = await startTxRecording(pageTx);
   await pageRx.waitForTimeout(holdMs);
   const audio = await stopRecording(pageRx, handle);
+  const txAudio = await stopRecording(pageTx, txHandle);
 
   await endTx(pageTx);
 
   const analysis = await analyzeAudio(pageRx, audio);
   analysis.passed = verifyAudio(analysis, freq, holdMs);
   await saveAudio(audio, label);
+  await saveAudio(txAudio, `${label}-tx`);
   if (!analysis.passed) {
     /* Silence has several causes that need different fixes: no media reached
        the receiver, the leg is muted because its crypto verdict never
@@ -494,8 +502,34 @@ export async function toneRoundTrip(
     const txRate = await pageTx.evaluate(
       () => (window as unknown as { __testTxRate?: number }).__testTxRate ?? null,
     );
+    /* Which track the sender's PC actually holds: an app that failed to
+       attach the tone keeps the silent carrier, which is a different bug
+       from an engine that mangles the tone it was given. */
+    const sender = await pageTx.evaluate(() => {
+      const w = window as unknown as {
+        mesh?: { legs?: Map<string, { call?: { peerConnection?: RTCPeerConnection } }> };
+        __testTxTrack?: MediaStreamTrack;
+      };
+      const held: string[] = [];
+      for (const leg of w.mesh?.legs?.values() ?? []) {
+        for (const s of leg.call?.peerConnection?.getSenders() ?? []) held.push(s.track?.id ?? 'none');
+      }
+      return { injected: w.__testTxTrack?.id ?? 'none', readyState: w.__testTxTrack?.readyState ?? 'none', held };
+    });
+    /* What the receiver ended up with on that leg, in its own words. */
+    const rxCaps = await pageRx.evaluate((slot: number) => {
+      const el = document.querySelector(`audio[data-remote="${slot}"]`) as HTMLAudioElement | null;
+      const src = el?.srcObject as MediaStream | null;
+      const tracks = src?.getAudioTracks?.() ?? [];
+      return { tracks: tracks.length, settings: tracks[0]?.getSettings?.() ?? null };
+    }, senderSlot);
+    const selfCheck = txAudio ? await analyzeAudio(pageRx, txAudio).catch(() => null) : null;
     throw new Error(
-      `tone ${freq}Hz (${label}) — analysis ${JSON.stringify(analysis)} (sender AudioContext ${txRate}Hz)\n── TX ──\n${tx}\n── RX ──\n${rx}`,
+      `tone ${freq}Hz (${label}) — analysis ${JSON.stringify(analysis)} (sender AudioContext ${txRate}Hz)\n` +
+      `generator (recorded on the sender): ${selfCheck ? JSON.stringify(selfCheck) : 'not captured'}\n` +
+      `sender tracks: injected ${sender.injected} (${sender.readyState}) vs PC holds ${JSON.stringify(sender.held)}\n` +
+      `receiver tracks: ${JSON.stringify(rxCaps)}\n` +
+      `── TX ──\n${tx}\n── RX ──\n${rx}`,
     );
   }
 }
