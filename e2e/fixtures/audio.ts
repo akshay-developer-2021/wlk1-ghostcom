@@ -18,17 +18,28 @@ export interface AudioAnalysis {
 /** Inject a pure sine tone as a MediaStreamTrack the mesh can transmit. */
 export async function injectTxTrack(page: Page, freq: number, durationMs: number): Promise<void> {
   await page.evaluate(({ freq: f, durationMs: ms }) => {
-    const ctx = new AudioContext({ sampleRate: 48000 });
-    const length = Math.ceil((ms / 1000) * 48000);
-    const buffer = ctx.createBuffer(1, length, 48000);
+    /* The DEVICE's rate, never a forced 48000. A mic track carries the device
+       rate in production, and an engine that has to resample a 48k context
+       down to the runner's 44.1k sink does it with a seam per frame: the
+       tone arrives as a clean sine PLUS a click every ~20ms, the zero-crossing
+       counter reads the clicks, and a perfect 1000Hz tone measures 1277Hz
+       (measured, chromium<->webkit on a 44.1k null sink). */
+    const ctx = new AudioContext();
+    const rate = ctx.sampleRate;
+    const length = Math.ceil((ms / 1000) * rate);
+    const buffer = ctx.createBuffer(1, length, rate);
     const data = buffer.getChannelData(0);
-    for (let i = 0; i < length; i++) data[i] = Math.sin((2 * Math.PI * f * i) / 48000) * 0.5;
+    for (let i = 0; i < length; i++) data[i] = Math.sin((2 * Math.PI * f * i) / rate) * 0.5;
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     const dest = ctx.createMediaStreamDestination();
     source.connect(dest);
     source.start();
-    (window as unknown as { __testTxTrack: MediaStreamTrack }).__testTxTrack = dest.stream.getAudioTracks()[0]!;
+    const w = window as unknown as { __testTxTrack: MediaStreamTrack; __testTxRate: number };
+    w.__testTxTrack = dest.stream.getAudioTracks()[0]!;
+    /* Read back, not assumed: an engine may hand out a rate it never
+       honours, and that is the first thing a wrong reading needs. */
+    w.__testTxRate = ctx.sampleRate;
   }, { freq, durationMs });
 }
 
@@ -119,7 +130,7 @@ export async function analyzeAudio(page: Page, base64: string): Promise<AudioAna
     const bin = atob(data);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const audioBuffer = await new AudioContext({ sampleRate: 48000 }).decodeAudioData(bytes.buffer);
+    const audioBuffer = await new AudioContext().decodeAudioData(bytes.buffer);
     const samples = audioBuffer.getChannelData(0);
     const sampleRate = audioBuffer.sampleRate;
 

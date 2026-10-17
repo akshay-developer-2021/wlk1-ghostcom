@@ -491,8 +491,11 @@ export async function toneRoundTrip(
        settled, or playback is blocked. The receiving page's own state says
        which. */
     const [tx, rx] = await Promise.all([meshDiagnostics(pageTx, 8), meshDiagnostics(pageRx, 8)]);
+    const txRate = await pageTx.evaluate(
+      () => (window as unknown as { __testTxRate?: number }).__testTxRate ?? null,
+    );
     throw new Error(
-      `tone ${freq}Hz (${label}) — analysis ${JSON.stringify(analysis)}\n── TX ──\n${tx}\n── RX ──\n${rx}`,
+      `tone ${freq}Hz (${label}) — analysis ${JSON.stringify(analysis)} (sender AudioContext ${txRate}Hz)\n── TX ──\n${tx}\n── RX ──\n${rx}`,
     );
   }
 }

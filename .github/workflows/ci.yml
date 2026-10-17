@@ -120,6 +120,15 @@ jobs:
       - name: app log
         if: failure()
         run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || cat test-results/logs/*.jsonl
+      # What the failing engine actually DELIVERED: freq/duration/rms cannot
+      # say whether that was the tone plus clicks or nothing at all, and the
+      # recorded audio can. Only kept when a test fails.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: audio-${{ matrix.pair }}
+          path: test-results/audio
+          if-no-files-found: ignore
 
   # The deploy shape. Pages serves this app under /wlk1-ghostcom/, where
   # root-absolute asset URLs, the service-worker scope and the manifest all
@@ -173,3 +182,11 @@ jobs:
       - name: app log
         if: failure()
         run: jq -r '"\(.browser) \(.level) \(.text)"' test-results/logs/*.jsonl || ls -R test-results
+      # Same reason as the cross-engine lane: keep the recorded tone when it
+      # fails, so a wrong reading can be heard instead of guessed at.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: audio-triple
+          path: test-results/audio
+          if-no-files-found: ignore
